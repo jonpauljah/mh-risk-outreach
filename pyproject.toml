@@ -1,0 +1,22 @@
+[project]
+name = "mh-risk-outreach"
+version = "0.1.0"
+description = "This project develops a prototype mental health outreach decision-support system that uses ETL and SQL to process member data, apply rule-based risk scoring, prioritize higher-risk patients, recommend outreach actions, and record short-term outreach outcomes."
+readme = "README.md"
+authors = [
+    { name = "jonpauljah" },
+    { name = "ahmed-spx" },
+    { name = "kevin2026-ksu" },
+    { name = "netEdwards" },
+    { name = "spham14" },
+    { name = "Wjudge26" },
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+mh-risk-outreach = "mh_risk_outreach:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
