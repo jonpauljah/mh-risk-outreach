@@ -22,14 +22,24 @@
    uv sync
    ```
 
-   uv automatically creates `.venv` and uses `uv.lock` to select dependency versions.
+   uv automatically creates `.venv` and uses `uv.lock` to select dependency versions. Project and development dependencies share this environment, and development dependencies are included by default.
 
    If you need to install Python, follow the [Python installation guide](https://www.python.org/about/gettingstarted/) and install Python 3.12, the version configured for this project.
 
 4. Run the project:
+
+   Run with project dependencies, excluding the development dependency group:
+
+   ```bash
+   uv run --no-dev mh-risk-outreach
+   ```
+
+   Run with both project and development dependencies available:
 
    ```bash
    uv run mh-risk-outreach
    ```
 
    You do not need to activate the virtual environment. The current application prints `Hello from mh-risk-outreach!`.
+
+   See [development dependency commands](docs/dependencies/dev-dependencies.md#local-commands) for linting, formatting, type checking, and testing.
