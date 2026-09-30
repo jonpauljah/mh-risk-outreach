@@ -31,7 +31,7 @@ The local hooks use the project's uv environment:
 | `ruff-check` | `uv run ruff check` | Report remaining lint errors. |
 | `ruff-format-check` | `uv run ruff format --check` | Verify Python formatting. |
 | `mypy` | `uv run mypy src` | Check types throughout the application source. |
-| `pytest` | `uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html` | Run the full test suite and measure application coverage. |
+| `pytest` | `uv run pytest` | Run the full test suite without collecting coverage. |
 
 All hooks use the `pre-push` stage. Built-in hooks use `repo = "builtin"`;
 local hooks use `repo = "local"` and `language = "system"`.
@@ -50,10 +50,20 @@ changes out of the way when checking code you intend to push.
 
 ## Viewing coverage
 
-The pytest hook prints coverage percentages and uncovered line numbers in
-the terminal. Open `htmlcov/index.html` in a browser to explore coverage by
-file. The `.coverage` data file and `htmlcov/` report directory are already
-ignored by Git.
+Coverage is a manual check. The pytest hook still runs the full test suite, but
+does not collect coverage or generate reports. This keeps routine hooks
+lightweight by avoiding extra measurement and report generation on every push.
+
+From the repository root, generate coverage when you want to review which lines
+the tests exercise:
+
+```bash
+uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html
+```
+
+This prints percentages and uncovered line numbers and saves the report to
+`htmlcov/index.html`. The `.coverage` data file and `htmlcov/` report directory
+are already ignored by Git.
 
 Coverage measures which application lines ran during tests; it does not
 prove that assertions are sufficient. No minimum coverage percentage is

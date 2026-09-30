@@ -84,9 +84,10 @@ always_run = true
 
 [[repos.hooks]]
 id = "pytest"
-name = "Pytest with coverage"
+name = "Pytest test suite"
 language = "system"
-entry = "uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html"
+# Coverage is a manual check; keep the hook focused on passing tests.
+entry = "uv run pytest"
 stages = ["pre-push"]
 pass_filenames = false
 always_run = true
