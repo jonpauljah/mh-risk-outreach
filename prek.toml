@@ -1,0 +1,92 @@
+[[repos]]
+repo = "builtin"
+
+[[repos.hooks]]
+id = "check-toml"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-merge-conflict"
+args = ["--assume-in-merge"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "detect-private-key"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-added-large-files"
+args = ["--enforce-all", "--maxkb=1024"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-case-conflict"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-illegal-windows-names"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "trailing-whitespace"
+args = ["--check", "--markdown-linebreak-ext=md"]
+files = '\.md$'
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "end-of-file-fixer"
+args = ["--check"]
+stages = ["pre-push"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff-fix"
+name = "Ruff lint fixes"
+language = "system"
+entry = "uv run ruff check --fix"
+types = ["python"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "Ruff formatting"
+language = "system"
+entry = "uv run ruff format"
+types = ["python"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "Ruff lint check"
+language = "system"
+entry = "uv run ruff check"
+types = ["python"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "ruff-format-check"
+name = "Ruff formatting check"
+language = "system"
+entry = "uv run ruff format --check"
+types = ["python"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "mypy"
+name = "Mypy type check"
+language = "system"
+entry = "uv run mypy src"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "pytest"
+name = "Pytest with coverage"
+language = "system"
+entry = "uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
