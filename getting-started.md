@@ -57,6 +57,22 @@
 
    The scaffold contains one test for the current CLI greeting. SQLite and the
    milestone 1 Streamlit interface are placeholders awaiting implementation.
-   See [project structure](docs/project-structure.md) for module responsibilities.
+   See [project structure](docs/milestone-1/project-structure.md) for module responsibilities.
 
    See [development dependency commands](docs/dependencies/dev-dependencies.md#local-commands) for linting, formatting, type checking, and testing.
+
+6. Initialize the pre-push hooks:
+
+   ```bash
+   uv run prek install --hook-type pre-push
+   ```
+
+   Each contributor must run this once in their checkout, including after a
+   fresh clone. The hooks run the configured checks before `git push`.
+   Verify the setup by running:
+
+   ```bash
+   uv run prek run --all-files --hook-stage pre-push
+   ```
+
+   See the [hook setup guide](docs/hooks/README.md) for details and troubleshooting.

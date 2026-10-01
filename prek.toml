@@ -17,6 +17,8 @@ stages = ["pre-push"]
 [[repos.hooks]]
 id = "check-added-large-files"
 args = ["--enforce-all", "--maxkb=1024"]
+# The selected milestone 1 CSV is about 1.69 MiB and is shared with the team.
+exclude = '^data/mental_health\.csv$'
 stages = ["pre-push"]
 
 [[repos.hooks]]

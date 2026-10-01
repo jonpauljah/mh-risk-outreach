@@ -3,7 +3,7 @@
 Milestone 1 will ingest a healthcare CSV through a Python ETL pipeline, store
 member records and relevant features in SQLite, and display the SQL records in
 a lightweight Streamlit interface. The current scaffold reserves modules for
-that work; functional implementation belongs in a separate issue/branch.
+that work. Implementing these modules and the SQL schema is part of Milestone 1.
 
 | Path | Intended responsibility |
 | --- | --- |
@@ -13,7 +13,7 @@ that work; functional implementation belongs in a separate issue/branch.
 | `src/mh_risk_outreach/etl/extract.py` | CSV reading and required-column validation |
 | `src/mh_risk_outreach/etl/transform.py` | Member field selection, cleaning, and normalization |
 | `src/mh_risk_outreach/etl/pipeline.py` | Run the import steps in order and report the results |
-| `src/mh_risk_outreach/db/schema.sql` | SQLite schema and constraints; currently comments only |
+| `src/mh_risk_outreach/db/schema.sql` | Executable SQLite tables and constraints to implement in Milestone 1; currently comments only |
 | `src/mh_risk_outreach/db/repository.py` | SQLite initialization, record loading, and queries |
 | `src/mh_risk_outreach/ui/app.py` | Milestone 1 Streamlit display of SQL records |
 | `tests/unit/test_main.py` | One baseline test asserting the current greeting |
@@ -40,5 +40,5 @@ uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html
 
 The test calls the existing `main()` and asserts its exact stdout, including the
 trailing newline. No coverage threshold is configured. See
-[development dependency commands](dependencies/dev-dependencies.md#local-commands)
+[development dependency commands](../dependencies/dev-dependencies.md#local-commands)
 for linting, formatting, and type checking.
