@@ -1,7 +1,7 @@
 # Pre-push hooks with prek
 
 The repository's [prek.toml](../../prek.toml) defines built-in checks and
-local hooks for Ruff, mypy, and pytest with coverage. Once installed in your checkout, these hooks
+local hooks for Ruff, mypy, and the pytest test suite. Once installed in your checkout, these hooks
 run before `git push`. A failed hook or a hook that modifies files stops the
 push. Local commits do not run these hooks.
 
@@ -46,7 +46,12 @@ uv run prek uninstall --hook-type pre-commit
 ## Available hooks
 
 See the [hook manifest](hook-manifest.md) for all hook IDs, commands, file
-selection, and coverage behavior.
+selection, and manual coverage instructions.
+
+The pytest hook runs the full test suite without collecting coverage. Coverage
+is a manual check to keep routine hooks lightweight and avoid generating reports
+on every push. See [viewing coverage](hook-manifest.md#viewing-coverage) for the
+command to generate a report when needed.
 
 Both uv and the project's environment must be available when pushing, including
 from an editor or Git client. After recreating the environment, rerun

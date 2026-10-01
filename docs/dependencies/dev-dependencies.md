@@ -56,10 +56,19 @@ uv run pytest
 
 **[pytest-cov](https://pytest-cov.readthedocs.io/en/stable/):** Adds line and branch coverage reporting to pytest to identify code paths that tests do not exercise.
 
-Run tests with line and branch coverage, showing uncovered lines:
+Coverage is run manually; the pre-push pytest hook runs only the test suite to
+avoid extra measurement and report generation on every push. Run tests with
+line and branch coverage, showing uncovered lines:
 
 ```bash
 uv run pytest --cov=mh_risk_outreach --cov-branch --cov-report=term-missing
 ```
 
-The pytest commands require tests to be added; pytest reports no tests collected until then.
+To also save a report to `htmlcov/index.html`:
+
+```bash
+uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html
+```
+
+See [viewing coverage](../hooks/hook-manifest.md#viewing-coverage) for details.
+Keep pytest-cov installed for these manual checks.

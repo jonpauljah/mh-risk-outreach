@@ -1,0 +1,8 @@
+-- Define the SQLite tables that will store member records and relevant features.
+--
+-- This file will describe the column names, allowed data types, and rules that
+-- keep stored records valid, such as requiring a member identifier to be unique.
+-- The Python database code will use these definitions when creating the tables.
+--
+-- This is a comment-only placeholder. The selected dataset and its field mapping
+-- will determine the actual table definitions in the implementation issue.
