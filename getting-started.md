@@ -42,6 +42,16 @@
 
    You do not need to activate the virtual environment. The current application prints `Hello from mh-risk-outreach!`.
 
+   Launch the Streamlit GUI:
+
+   ```bash
+   uv run streamlit run src/mh_risk_outreach/ui/app.py
+   ```
+
+   Streamlit prints a local URL (usually `http://localhost:8501`) and opens it
+   in your browser. Press `Ctrl+C` in the terminal to stop it. The GUI currently
+   shows a title only; displaying the SQLite records is in progress.
+
 5. Run the baseline test:
 
    ```bash
