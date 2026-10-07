@@ -13,11 +13,12 @@ Use `pandas.read_csv()` in `etl/extract.py` to read the selected CSV. Validate
 its header and required columns before transformation. Record the input path,
 snapshot/checksum, and number of source rows in the processing summary.
 
-The initial field selection includes all 51 source columns, including
-`Has_Mental_Health_Issue`, so the survey remains available for inspection.
-Document any change to that selection and its rationale before implementation.
-The CSV has no member identifier; a survey row represents a prototype record,
-not a verified patient identity.
+The field selection keeps 30 features (14 numeric, 16 categorical) plus the
+target `Has_Mental_Health_Issue`; `config.py` is the single source of truth for
+that list. The remaining source columns (symptom and treatment-status fields)
+are not loaded in this segment. A surrogate `Member_ID` is added during
+transform, so the loaded table has 32 columns. The CSV has no member identifier;
+a survey row represents a prototype record, not a verified patient identity.
 
 **Pending for Milestone 1:** define accepted input encoding, required columns,
 handling of unexpected columns, and errors for unreadable files or malformed CSV.
@@ -86,18 +87,22 @@ testable outcome and must not silently accumulate duplicate records.
 
 ## Schema creation and loading
 
-`db/repository.py` must initialize tables from `db/schema.sql` before loading
-transformed records. That SQL file must contain executable definitions with
-column types, keys, nullability, and agreed constraints during Milestone 1.
+`db/repository.py` initializes tables from `db/schema.sql` before loading
+transformed records. That SQL file contains executable definitions with column
+types, the `Member_ID` primary key, NOT NULL, and `CHECK (… IN (0, 1))` on the
+binary fields and target.
 
-Use parameterized inserts or pandas `to_sql()` against the existing tables.
-Do not use `if_exists="replace"` to recreate tables with inferred definitions,
-because that would discard the tracked schema and constraints. Keep sequencing
-in `etl/pipeline.py` and database access in `db/repository.py`.
+The load uses pandas `to_sql(table, conn, if_exists="append", index=False)`
+against the existing table. It never uses `if_exists="replace"`, which would
+discard the tracked schema and constraints. Sequencing stays in `etl/pipeline.py`
+and database access in `db/repository.py`.
 
-**Pending for Milestone 1:** select the database path, transaction boundaries,
-and rollback behavior. A failed load must have a documented database state;
-report success only after the intended writes commit.
+Repeat imports replace the table contents transactionally: `save_records`
+deletes existing rows and appends the fresh load inside one transaction
+(`with conn:`), so rows do not accumulate across runs. Any failure rolls the
+whole operation back, leaving the previously stored data intact; the load is
+reported as successful only after that transaction commits. The database path
+is `config.DEFAULT_DB_PATH` (`patients.db`).
 
 ## Processing log or summary
 

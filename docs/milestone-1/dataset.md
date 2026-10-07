@@ -1,9 +1,10 @@
 # Healthcare dataset
 
 The selected input is the Global Mental Health & Lifestyle Survey Dataset.
-The CSV has been downloaded and inspected. Milestone 1 will extract, clean, and load the selected fields into an explicit
-SQL schema. The initial selection includes all 51 columns; the field mapping
-and schema must be finalized and implemented during this milestone.
+The CSV has been downloaded and inspected. Milestone 1 extracts, cleans, and
+loads the selected fields into an explicit SQL schema. The selection keeps 30
+features plus the target `Has_Mental_Health_Issue` (32 columns with the added
+`Member_ID`); `config.py` holds the authoritative list.
 
 ## Source
 
@@ -52,10 +53,11 @@ belong to Milestone 1; model input selection and training belong to later work.
 
 ## Relevant columns
 
-Milestone 1 initially selects all 51 source columns, including
-`Has_Mental_Health_Issue`. Numeric values and 0/1 fields are preserved, and
-categories such as `Gender` and `Employment_Status` remain text. This CSV has
-no `Occupation` column. See [ETL rules](etl-rules.md) for mapping and loading requirements.
+Milestone 1 selects 30 features (14 numeric, 16 categorical) plus the target
+`Has_Mental_Health_Issue`; the remaining source columns are not loaded in this
+segment. Numeric values and 0/1 fields are preserved, and categories such as
+`Gender` and `Employment_Status` remain text. This CSV has no `Occupation`
+column. See [ETL rules](etl-rules.md) for mapping and loading requirements.
 
 **Pending for Milestone 1:** document field meanings, SQL destinations, types,
 units where known, allowed values, and cleaning rules. Identify the target,
