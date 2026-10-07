@@ -37,6 +37,14 @@ Not every column should go into the model. The first table shows which
 columns we keep and which we drop, with the reason. The second shows how
 each kept column is transformed before training.
 
+> **Note — storage and model input are intentionally different.** The
+> Milestone 1 ETL stores the *whole* survey: all 50 feature columns plus the
+> target (52 columns with `Member_ID`) in the `patients` table. The "drop"
+> decisions below are **model-input** choices applied at the modeling stage by
+> `prepare()`, not at storage. Nothing is dropped from the database. Keeping
+> every column stored lets us revisit these choices, run the fairness checks,
+> and feed the recommendation stage without re-importing the CSV.
+
 
 | Group | Columns | Decision |
 | --- | --- | --- |
