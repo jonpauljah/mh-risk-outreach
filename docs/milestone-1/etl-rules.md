@@ -13,12 +13,12 @@ Use `pandas.read_csv()` in `etl/extract.py` to read the selected CSV. Validate
 its header and required columns before transformation. Record the input path,
 snapshot/checksum, and number of source rows in the processing summary.
 
-The field selection keeps 30 features (14 numeric, 16 categorical) plus the
-target `Has_Mental_Health_Issue`; `config.py` is the single source of truth for
-that list. The remaining source columns (symptom and treatment-status fields)
-are not loaded in this segment. A surrogate `Member_ID` is added during
-transform, so the loaded table has 32 columns. The CSV has no member identifier;
-a survey row represents a prototype record, not a verified patient identity.
+The ETL ingests the whole survey: all 50 source feature columns plus the target
+`Has_Mental_Health_Issue`. `config.py` is the single source of truth, grouping
+the columns by SQL storage type (integer scores, real hours, text categories,
+binary flags). A surrogate `Member_ID` is added during transform, so the loaded
+table has 52 columns. The CSV has no member identifier; a survey row represents
+a prototype record, not a verified patient identity.
 
 **Pending for Milestone 1:** define accepted input encoding, required columns,
 handling of unexpected columns, and errors for unreadable files or malformed CSV.
@@ -88,9 +88,9 @@ testable outcome and must not silently accumulate duplicate records.
 ## Schema creation and loading
 
 `db/repository.py` initializes tables from `db/schema.sql` before loading
-transformed records. That SQL file contains executable definitions with column
-types, the `Member_ID` primary key, NOT NULL, and `CHECK (… IN (0, 1))` on the
-binary fields and target.
+transformed records. That SQL file contains executable definitions for all 52
+columns with their types, the `Member_ID` primary key, NOT NULL, and
+`CHECK (… IN (0, 1))` on the 9 binary flags and the target.
 
 The load uses pandas `to_sql(table, conn, if_exists="append", index=False)`
 against the existing table. It never uses `if_exists="replace"`, which would
