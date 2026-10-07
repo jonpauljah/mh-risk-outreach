@@ -8,9 +8,8 @@ The current scaffold does not yet implement that workflow.
 ## Current checks
 
 Follow [getting started](../../getting-started.md) to install dependencies.
-From the project root, `uv run mh-risk-outreach` currently prints
-`Hello from mh-risk-outreach!`, and `uv run pytest` checks that greeting.
-These baseline checks do not verify ETL, SQL, or Streamlit.
+From the project root, `uv run mh-risk-outreach` launches the Streamlit display,
+and `uv run pytest` checks that `main()` invokes Streamlit to run the app.
 Coverage remains a [manual check](../dependencies/dev-dependencies.md#pytest-cov).
 
 ## Dataset and extraction
@@ -53,11 +52,19 @@ transaction and rollback policy. Successful status must follow a committed load.
 
 ## Streamlit display
 
-**Pending for Milestone 1:** record the implemented launch command and shared
-database path. Verify the GUI shows records queried from SQLite, with readable
-column names and values, rather than reading the CSV directly. Compare sample
-rows with SQL output. Confirm the UI explains a missing or empty database and
-how to populate it. CSV upload is not a required feature.
+Launch the display from the project root:
+
+```bash
+uv run streamlit run src/mh_risk_outreach/ui/app.py
+```
+
+It reads the shared database at `config.DEFAULT_DB_PATH` (`patients.db`, table
+`patients`) through `db/repository.py` (`load_from_db` and `database_status`),
+not the CSV. The GUI shows the stored records in a sortable, searchable table
+with readable column names and values; compare sample rows against the SQL
+output above. When the database file or table is absent or empty, the UI shows
+a warning with the import command (`uv run python -m mh_risk_outreach.etl.pipeline`)
+and stops instead of erroring. CSV upload is not a required feature.
 
 ## Processing log or summary
 

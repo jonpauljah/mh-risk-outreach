@@ -53,3 +53,27 @@ def load_from_db(
         return pd.read_sql(f"SELECT * FROM {table}", conn)
     finally:
         conn.close()
+
+
+def database_status(
+    db_path: str = DEFAULT_DB_PATH, table: str = DEFAULT_TABLE
+) -> tuple[bool, int]:
+    """Report whether the table exists and how many rows it holds.
+
+    Returns ``(exists, row_count)`` and never raises for a missing file or
+    table, so the UI can show a populate-the-database message instead of an
+    error. ``(False, 0)`` means the database file or table is not there yet.
+    """
+    if not Path(db_path).exists():
+        return (False, 0)
+    conn = sqlite3.connect(db_path)
+    try:
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not found:
+            return (False, 0)
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        return (True, int(count))
+    finally:
+        conn.close()

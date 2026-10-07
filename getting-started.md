@@ -40,7 +40,19 @@
    uv run mh-risk-outreach
    ```
 
-   You do not need to activate the virtual environment. The current application prints `Hello from mh-risk-outreach!`.
+   You do not need to activate the virtual environment. `uv run mh-risk-outreach`
+   launches the Streamlit display.
+
+   First import the dataset into SQLite, then open the display:
+
+   ```bash
+   uv run python -m mh_risk_outreach.etl.pipeline
+   uv run mh-risk-outreach
+   ```
+
+   The second command is equivalent to
+   `uv run streamlit run src/mh_risk_outreach/ui/app.py`. The display reads from
+   `patients.db`; if it is empty, the page explains how to populate it.
 
 5. Run the baseline test:
 
@@ -55,8 +67,7 @@
    uv run pytest --cov=mh_risk_outreach --cov-report=term-missing --cov-report=html
    ```
 
-   The scaffold contains one test for the current CLI greeting. SQLite and the
-   milestone 1 Streamlit interface are placeholders awaiting implementation.
+   The suite includes a test that `main()` launches the Streamlit display.
    See [project structure](docs/milestone-1/project-structure.md) for module responsibilities.
 
    See [development dependency commands](docs/dependencies/dev-dependencies.md#local-commands) for linting, formatting, type checking, and testing.

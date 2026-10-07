@@ -72,9 +72,10 @@ targets are not required for this milestone.
 
 ## Current behavior
 
-`uv run mh-risk-outreach` only prints `Hello from mh-risk-outreach!`.
-The baseline test checks that greeting. No CSV import, database creation,
-processing summary, or Streamlit display runs yet.
+`uv run mh-risk-outreach` launches the Streamlit display. The data import runs
+via `uv run python -m mh_risk_outreach.etl.pipeline`, which reads the CSV,
+selects the agreed columns plus the target, and loads them into SQLite. A
+processing summary (counts, timing, validation reasons) is not yet implemented.
 
 See [project structure](project-structure.md), [database architecture](database.md),
 and [milestone verification](verification.md).
