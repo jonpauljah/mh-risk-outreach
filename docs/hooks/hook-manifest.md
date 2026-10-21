@@ -12,7 +12,7 @@ The built-in hooks run directly in prek without extra Python dependencies:
 | `check-toml` | Validate TOML syntax in project and hook configuration. |
 | `check-merge-conflict` | Detect unresolved merge conflict markers, including outside an active merge or rebase (`--assume-in-merge`). |
 | `detect-private-key` | Detect private keys; this is not a general secret scanner. |
-| `check-added-large-files` | Reject selected files larger than 1,024 KiB. `--enforce-all` includes files already committed before pushing. |
+| `check-added-large-files` | Reject selected files larger than 1,024 KiB, except `data/mental_health.csv`. `--enforce-all` includes files already committed before pushing. |
 | `check-case-conflict` | Detect paths that clash on case-insensitive filesystems. |
 | `check-illegal-windows-names` | Detect filenames that Windows cannot use. |
 | `trailing-whitespace` | Check trailing whitespace only in `.md` files, preserving Markdown hard line breaks. |
@@ -21,6 +21,10 @@ The built-in hooks run directly in prek without extra Python dependencies:
 The whitespace and final-newline hooks use `--check`, so they report problems
 without editing files. Their behavior is described in the official
 [built-in hook reference](https://prek.j178.dev/reference/built-in-hooks/).
+
+The file-size hook excludes only `data/mental_health.csv`, the selected milestone
+1 dataset, so contributors can share the same input. The CSV is about 1.69 MiB;
+all other selected files retain the 1,024 KiB limit.
 
 The local hooks use the project's uv environment:
 

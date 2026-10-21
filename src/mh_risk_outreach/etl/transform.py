@@ -1,9 +1,17 @@
-"""Clean member records and put their values into a consistent format.
+"""Select the chosen fields and put the records into the shape we store.
 
-This file will select the fields needed for milestone 1 and apply the cleaning
-rules agreed on for the chosen dataset. Those rules will cover missing values,
-data types, inconsistent formats, and duplicate member records as needed.
-The prepared records will then be ready to save to SQLite.
-
-This is a placeholder; field selection and cleaning rules are not defined yet.
+Keeps the agreed feature columns plus the target and adds a stable ``Member_ID``.
+The transform is intentionally minimal for the POC: no imputation, scaling, or
+category encoding (those belong to later segments). Values are kept as read.
 """
+
+import pandas as pd
+
+from mh_risk_outreach.config import FEATURES, MEMBER_ID, TARGET
+
+
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep FEATURES + TARGET and add a sequential Member_ID as the first column."""
+    df = df[FEATURES + [TARGET]].copy()
+    df.insert(0, MEMBER_ID, range(1, len(df) + 1))  # stable surrogate key
+    return df
