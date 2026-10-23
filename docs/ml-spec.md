@@ -13,6 +13,10 @@ We will use logistic regression as the first model for the MVP/POC. It is the si
 
 The training data is a Kaggle survey dataset of 10,000 rows. The column `Has_Mental_Health_Issue` (0 or 1) is the answer column the model learns to predict. The input columns are a mix of yes/no flags, number scales, and text categories.
 
+The sponsor approved `Has_Mental_Health_Issue` as the prediction target. The
+prototype will use the model's estimated probability of this label to rank
+records for outreach priority.
+
 We hold back 20% of the real rows as a test set. The model never sees these during training, so they give an honest check of its predictions. Synthetic data is used only to test that the code handles unusual inputs. It cannot measure prediction quality, because made-up rows have no true answer.
 
 Model quality is measured with recall, precision, PR-AUC, and calibration. PR-AUC is one number for the whole model that summarizes how well it ranks members. We use it to compare models and pick the best one.
@@ -83,6 +87,29 @@ The transformations put every column into a form the model can use:
 - Put all columns on the same scale, which logistic regression needs.
 - Handle missing values. The Kaggle data has none, but future data will, so
   the preparation code must define what happens to a blank.
+
+### Model input selection (issue #13)
+
+`mh_risk_outreach.model_inputs.MODEL_FEATURES` defines the 35 selected source
+columns in a fixed order. `select_model_inputs(records)` returns a copy of
+those columns, preserving values and the row index. It excludes `Member_ID`,
+`Has_Mental_Health_Issue`, and the 15 source features marked for exclusion above.
+The full survey remains stored by the ETL.
+
+Training code keeps the inputs (`X`) and target (`y`) separate:
+
+```python
+from mh_risk_outreach.config import TARGET
+from mh_risk_outreach.model_inputs import select_model_inputs
+
+X = select_model_inputs(records)
+y = records[TARGET].copy()  # Training only; never passed into input selection.
+```
+
+Scoring uses the same selector without requiring a target column. Missing model
+input columns raise `KeyError`; extra columns are ignored. Selection does not
+clean values, validate their contents, encode categories, scale numbers, or fit
+a model. Those steps remain future work, outside issue #13.
 
 ## Training
 
@@ -376,9 +403,9 @@ XGBoost on the same split and compare all three on PR-AUC.
   more balanced answer column? Does she have one to recommend?
 - **The 90% accuracy target.** Always answering "yes" already reaches 92%.
   What target should we use instead for recall, precision, or PR-AUC?
-- **What the answer column means.** `Has_Mental_Health_Issue` says a member
-  has an issue now. Is that an acceptable stand-in for "at increasing risk"
-  in this POC?
+- **Resolved — prediction target.** The sponsor approved
+  `Has_Mental_Health_Issue` for the prototype's risk ranking. The source
+  label's definition remains a documented dataset limitation.
 - **Outreach capacity.** How many members can a care team contact per
   cycle? This sets the top K.
 - **Excluded columns.** We left gender and country out of the model and

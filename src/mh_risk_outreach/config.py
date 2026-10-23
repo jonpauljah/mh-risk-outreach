@@ -1,8 +1,7 @@
 """Shared configuration: the column selection and the dataset/database paths.
 
-These constants are the single source of truth for the project. The ETL modules
-and later segments import them from here instead of redefining them, so the
-chosen columns stay consistent everywhere.
+These constants define storage columns and dataset/database paths. The ETL
+stores the full survey; model_inputs.py defines the smaller model-input list.
 
 The ETL ingests the whole survey: all 50 source columns plus the target. Columns
 are grouped by SQL storage type so ``schema.sql`` and the transform agree:
@@ -83,7 +82,7 @@ BINARY_FLAGS = [
 
 NUMERIC = INTEGER_SCORES + REAL_HOURS  # continuous/ordinal numerics (28)
 CATEGORICAL = TEXT_CATEGORIES + BINARY_FLAGS  # text + 0/1 flags (22)
-FEATURES = NUMERIC + CATEGORICAL  # the X inputs (50)
+FEATURES = NUMERIC + CATEGORICAL  # all 50 stored source features
 TARGET = "Has_Mental_Health_Issue"  # the Y answer key (never a feature)
 MEMBER_ID = "Member_ID"  # surrogate key added during transform
 
