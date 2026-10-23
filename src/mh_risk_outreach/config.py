@@ -90,3 +90,10 @@ MEMBER_ID = "Member_ID"  # surrogate key added during transform
 DEFAULT_CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "mental_health.csv"
 DEFAULT_DB_PATH = "patients.db"
 DEFAULT_TABLE = "patients"
+
+# ---- Train/evaluation split ----
+# Fixed seed for every random step so two runs produce the same split; the
+# value is arbitrary and only has to stay the same. TEST_SIZE is the share of
+# rows held back for evaluation (see datasets.py and docs/ml-spec.md).
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
