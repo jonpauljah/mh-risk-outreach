@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=3.0.6",
     "scikit-learn>=1.9.1",
     "streamlit>=1.64.0",
+    "xgboost>=2.1",
 ]
 
 [project.scripts]
@@ -40,4 +41,10 @@ extend-select = ["I"]
 [[tool.mypy.overrides]]
 # scikit-learn ships no type information.
 module = ["sklearn.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# xgboost ships no type information. Added for the model comparison in #15;
+# nothing imports it yet on this branch.
+module = ["xgboost.*"]
 ignore_missing_imports = true
