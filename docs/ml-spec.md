@@ -111,6 +111,87 @@ input columns raise `KeyError`; extra columns are ignored. Selection does not
 clean values, validate their contents, encode categories, scale numbers, or fit
 a model. Those steps remain future work, outside issue #13.
 
+### Model input preparation (issue #12)
+
+`mh_risk_outreach.prepare` turns the 35 selected inputs into the 44 numbers the
+model reads. It has two parts:
+
+1. **`clean_inputs(records)`: fixed rules that learn nothing from the data.**
+   It selects the 35 inputs, trims text, matches categories regardless of
+   letter case (`" yes EASILY "` becomes `"Yes easily"`), converts numbers,
+   and turns blank cells (missing, empty, or only spaces) into gaps for step 2
+   to fill. Values outside the documented ones stop the run with
+   `InvalidInputError`, which lists every bad row, column, value, and reason.
+2. **`build_preprocessor()`: an unfitted scikit-learn step that learns from
+   training rows.** It fills blanks, scales numbers, and encodes text.
+
+`build_preparation_pipeline()` chains both into one scikit-learn `Pipeline`.
+Training code (issues #14 and #15) fits it, with the model appended, on the
+training split only, and saves the fitted result. Scoring loads that same
+object, so training and scoring always prepare rows identically and always get
+the same 44 columns in the same order.
+
+```python
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+from mh_risk_outreach.config import TARGET
+from mh_risk_outreach.prepare import build_preparation_pipeline
+
+model = make_pipeline(build_preparation_pipeline(), LogisticRegression())
+model.fit(train_rows, train_rows[TARGET])  # learns fill values and scaling here
+model.predict_proba(member_rows)[:, 1]  # scoring reuses them unchanged
+```
+
+**Rules per column group**
+
+| Group | Valid values | Blank | Unknown or invalid value | Output |
+| --- | --- | --- | --- | --- |
+| Number scales (23) | 13 symptoms 0–10 (`Panic_Attacks` 0–4); `Social_Support`, `Feel_Understood`, `Loneliness`, `Financial_Stress`, `Work_Stress_Level`, `Job_Satisfaction`, `Work_Life_Balance` 1–10; `Close_Friends_Count` 0 or more; `Sleep_Hours_Night` 0–24; `Age` 18–120 | Training median | Reject the run | `StandardScaler` (training average and spread) |
+| Already 0/1 (5) | 0 or 1 | Most common training value | Reject the run | Unchanged |
+| Ordered text (4) | `Income_Level`: Low 0, Middle 1, High 2; `Exercise_Per_Week`: Never 0, 1-2 times 1, 3-4 times 2, 5+ times 3; `Alcohol_Frequency`: Never 0, Rarely 1, Weekly 2, Daily 3; `Discuss_Mental_Health`: Never 0, Rarely 1, Sometimes 2, Yes easily 3 | Most common training value | Reject the run (it has no place in the order) | The listed number |
+| Unordered text (3) | `Employment_Status`: Full-time, Part-time, Self-employed, Student, Unemployed; `Marital_Status`: Single, Married, Divorced, Widowed; `Smoking`: Never, Former, Current | Most common training value | Keep the row, warn, and set all of that column's 0/1 columns to 0 | One 0/1 column per listed category (12) |
+
+A missing input column raises `KeyError`. The target, `Member_ID`, and any
+other columns are ignored.
+
+**Why these choices**
+
+- **Fill blanks instead of dropping rows.** Dropping a row loses its answer for
+  training and leaves a member unscored. The median and most common value are
+  the simplest fills that do not let one extreme value pull the result. They
+  are a starting point: **once the model is trained (#15), compare them with
+  dropping rows or adding a "was blank" flag column**, since the Kaggle data
+  has no blanks to show which works better.
+- **Reject invalid values instead of guessing.** A typo or an out-of-range
+  score means the data is wrong, not merely incomplete. Stopping with the
+  affected rows listed avoids silently scoring members on bad data.
+- **Allow new unordered categories.** A value such as `"Retired"` is plausible
+  in real data. All-zero columns let the model score that member from the rest
+  of their row. Ordered text cannot do this, because a new value has no
+  position between the known ones.
+- **Valid ranges** come from the survey scales in the Kaggle snapshot and need
+  confirming for any new dataset. `Age` starts at 18 because the model is
+  built for adult members; the upper bounds of 24 sleep hours and 120 years
+  are physical limits, not observed maximums.
+- **Ordered text is not scaled**, following the column table above. Its values
+  (0–3) are already on a range similar to the scaled columns.
+
+**Data concerns that remain**
+
+- The Kaggle data has no blanks, duplicates, stray spaces, or case
+  differences, so the cleaning rules are exercised only by test inputs in
+  `tests/unit/test_prepare.py`.
+- The review-flag combinations in the [dataset guide](milestone-1/dataset.md)
+  (for example, unemployed members with positive work hours) involve only
+  columns excluded from the model, so they do not affect training. They remain
+  in the database unchanged.
+- `Not sure` and `Prefer not to say` appear only in excluded columns
+  (`Company_Mental_Health_Support`, `Gender`), so no model input needs a rule
+  for them yet.
+- The answer column's 92% "yes" balance and its undocumented definition are
+  unchanged by preparation; see the open questions below.
+
 ## Training
 
 Training is a build step. The input is our prepared table of member rows.
@@ -229,7 +310,10 @@ default such as the column's average.
 
 **Requirement:** `prepare()` defines one of these behaviors for every column.
 
-**Decision needed:** which behavior each column gets.
+**Decided (issue #12):** blanks are filled from training values and invalid
+values reject the run; see [Model input preparation](#model-input-preparation-issue-12)
+for the rule per column. The fill choice should be revisited once the model is
+trained.
 
 #### 5. Reproducibility
 
