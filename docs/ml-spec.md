@@ -192,6 +192,93 @@ other columns are ignored.
 - The answer column's 92% "yes" balance and its undocumented definition are
   unchanged by preparation; see the open questions below.
 
+### Training and evaluation datasets (issue #14)
+
+`mh_risk_outreach.datasets` carves the stored survey into a **training** set the
+model learns from and an **evaluation** set held back to check it on rows it
+never saw. The code splits rows only; it fits no scaler, imputer, or model.
+
+**Split approach.** `split_dataset(records)` calls scikit-learn's
+`train_test_split` with `test_size=0.20`, `stratify=records[TARGET]`, and
+`random_state=42`. The split is on the rows returned by
+`repository.load_from_db()` and is produced in memory — the parts are not
+written to disk (an opt-in `write_splits` helper exists for local inspection
+only; the files are large and are not committed). `RANDOM_STATE` and `TEST_SIZE`
+live in `config.py`.
+
+- **80/20** gives the model enough rows to learn from while keeping an
+  evaluation set large enough to measure.
+- **Stratified** because the label is ~92% positive; a plain random split could
+  leave the evaluation set with too few negatives to judge. Stratifying keeps
+  each part's positive rate close to the whole dataset's.
+
+**Record counts** (from `uv run python -m mh_risk_outreach.datasets`):
+
+| Set | Rows | Positives (`=1`) | Negatives (`=0`) |
+| --- | --- | --- | --- |
+| Training | 8,000 (80%) | 7,373 (92.2%) | 627 |
+| Evaluation | 2,000 (20%) | 1,843 (92.2%) | 157 |
+| Total | 10,000 | 9,216 | 784 |
+
+**No leakage.** The split happens before anything is fitted. The preparation
+pipeline (`build_preparation_pipeline`) and the model are fitted on the training
+rows only (issue #15), so no value learned from the evaluation rows — a median,
+an average, a weight — reaches training. `split_xy(records)` separates the 35
+inputs (`X`) from the target (`y`) using the issue #13 selector, so the target
+is never fed in as a predictor.
+
+**Repeatable and separate.** The fixed seed makes two runs select the same rows.
+`assert_disjoint(split)` verifies by `Member_ID` that no member is in both parts
+and that none was dropped or duplicated; the `python -m` run reports a member
+overlap of 0. Tests in `tests/unit/test_datasets.py` cover reproducibility,
+disjointness, the 20% share, preserved balance, and `X`/`y` separation.
+
+**Limitations.**
+
+- The evaluation set has only ~157 negatives, so any metric about the "no
+  issue" class is measured on few rows and will be noisy.
+- It is a single static holdout. Cross-validation (repeating the split several
+  ways) would give a steadier estimate and is not done yet.
+- Synthetic data is not used for evaluation: made-up rows have no true answer,
+  so they cannot measure prediction quality.
+
+### Model choice analysis — XGBoost vs Random Forest vs K-Means (issue #14 addendum)
+
+The candidates for the risk score were weighed against this task: predict a 0/1
+label, return a probability that can be *calibrated* and used to *rank* members
+within a fixed outreach capacity, and be measured by recall, precision, PR-AUC,
+and calibration.
+
+| Option | Fit for this task |
+| --- | --- |
+| **K-Means clustering** | **Not suitable as the classifier.** It is unsupervised: it ignores the label, so it cannot be trained toward "needs outreach," produces no probability to calibrate or rank by, and cannot be scored on recall/precision/PR-AUC. It only groups similar rows. Keep it in reserve as optional *member segmentation*, not risk scoring. |
+| **Random Forest** | Supervised, captures non-linear patterns, gives usable probabilities (best calibrated afterward), and exposes feature importances for explanations. Handles the imbalance with `class_weight`. Already available through scikit-learn — no new dependency. |
+| **XGBoost** | Gradient boosting, usually the strongest ranker (PR-AUC) on tabular data of this size. Handles the imbalance with `scale_pos_weight`; its raw probabilities should be calibrated (`CalibratedClassifierCV`, isotonic). Added as a dependency for the #15 comparison. |
+
+**Recommendation.** Keep **logistic regression** as the interpretable baseline
+(its per-column weights give the "top reasons" directly). Evaluate **XGBoost**
+as the primary candidate for ranking quality, with **Random Forest** as a
+cross-check. Calibrate the chosen model's probabilities. Handle the imbalance
+with `scale_pos_weight` / `class_weight` and select members by **rank (top-K
+within outreach capacity)** rather than a fixed probability cutoff — see
+[Priority bands](#6-priority-bands).
+
+**Metrics and gates.** Report recall, precision, PR-AUC, calibration, ROC-AUC,
+and accuracy, each next to the always-"yes" baseline (92% accuracy, 0.92
+PR-AUC). Two gates apply:
+
+1. **PR-AUC must beat the baseline** — the primary gate, because it measures
+   ranking, which is what the outreach worklist needs.
+2. **Accuracy ≥ 90%** — kept as a reported floor, but it is **not proof the
+   model learned anything**: always answering "yes" already reaches 92%. It
+   cannot be the only gate.
+
+Because the minority class here is "no issue" (784 rows), also report
+**negative-class recall** — correctly identifying members *without* an issue is
+the harder signal and the one most likely to separate a real model from the
+baseline. The empirical comparison and the numbers land in issue #15; this
+section records the decision that drives it.
+
 ## Training
 
 Training is a build step. The input is our prepared table of member rows.
@@ -474,7 +561,10 @@ XGBoost on the same split and compare all three on PR-AUC.
 - What `prepare()` does with a blank or unknown value in each column:
   reject the row or fill a default.
 - How priority is assigned: top K members, or bands by percentage.
-- Where model files and the log table are stored.
+- Where model files and the log table are stored. (Train/evaluation datasets
+  need no such decision: `datasets.split_dataset` produces them in memory from
+  the stored rows with a fixed seed, so they are reproduced on demand rather
+  than stored.)
 - Who owns each part: data preparation, training, scoring, tests, and the
   observability page.
 - Whether to generate synthetic data for missed appointments and missed
