@@ -279,6 +279,73 @@ the harder signal and the one most likely to separate a real model from the
 baseline. The empirical comparison and the numbers land in issue #15; this
 section records the decision that drives it.
 
+### First model and model framework (issue #15)
+
+**Decision: Random Forest is the first *implemented* model, not logistic
+regression.** The earlier sections keep logistic regression as the interpretable
+baseline on paper, but the first trained-and-evaluated model is Random Forest
+(`class_weight="balanced"` for the ~92% positive rate). XGBoost is now implemented
+too (issue #24) and compared against Random Forest and the majority baseline on
+the same split, inputs, and metrics.
+
+**The model framework is open for extension, closed for modification.** A model
+is defined by just two things — a name and an unfitted estimator — so adding the
+next one (XGBoost, K-means, ...) never edits the training, evaluation, or
+persistence code.
+
+| Piece | File | Role |
+| --- | --- | --- |
+| `RiskModel` (ABC) | `models/base.py` | Sets the contract: a `name` and `build_estimator()`; `build_pipeline()` puts `build_preparation_pipeline()` (issue #12) in front of the estimator. |
+| `RandomForestRiskModel` | `models/random_forest.py` | The whole first model: a name and a `RandomForestClassifier`. |
+| `XGBoostRiskModel` | `models/xgboost_model.py` | The second model, added the same way: a name and an `XGBClassifier` (`scale_pos_weight` for the imbalance). |
+| `REGISTRY` | `models/__init__.py` | `name -> class`. The name is also the results-table and artifact-folder name. |
+| Training workflow | `models/train.py` | Load → `split_dataset` (issue #14) → fit on train only → score held-out rows → measure → save artifact → write the results row. Works for any `RiskModel`. |
+| Metrics | `evaluation.py` | `evaluate_scores` and `majority_baseline`; pure functions, fit nothing. |
+| Results store | `db/results.py` | `save_model_results(metrics, table=<model name>)` creates a per-model table and appends one row per run. |
+
+**Adding a second model is two edits:** write a `RiskModel` subclass in its own
+module, then add one line to `REGISTRY`. It automatically gets its own results
+table named after it. Run a model with
+`uv run python -m mh_risk_outreach.models.train --model <name>`. XGBoost was
+added exactly this way — a new `models/xgboost_model.py` and one `REGISTRY` line,
+with no change to the training, evaluation, or persistence code. (A clustering
+model such as K-means does **not** fit this framework: it is unsupervised, has no
+`predict_proba`, and cannot be scored on recall/precision/PR-AUC, so it belongs
+in a separate segmentation step, as the model-choice analysis above concludes.)
+
+**Per-model results table.** Each model writes to its own table (e.g.
+`random_forest`) in `patients.db`, one row per run, holding the asked-for values
+(recall, precision, PR-AUC, calibration/Brier) next to the majority baseline,
+plus reproducibility fields (`run_at`, `model_version`, `n_train`, `n_eval`,
+`random_state`). The fitted pipeline and a `metadata.json` are saved under
+`artifacts/<name>/` (git-ignored; reproducible from code and the fixed seed).
+
+**Measured results** (8,000 train / 2,000 eval, seed 42):
+
+| Measure | Random Forest | XGBoost | Majority baseline |
+| --- | --- | --- | --- |
+| PR-AUC (the gate) | 0.941 | 0.936 | 0.921 |
+| ROC-AUC | 0.635 | 0.608 | 0.5 |
+| Recall @0.5 | 1.000 | 0.887 | 1.000 |
+| Precision @0.5 | 0.921 | 0.937 | 0.921 |
+| Negative-class recall @0.5 | 0.000 | 0.299 | 0.000 |
+| Accuracy @0.5 | 0.921 | 0.841 | 0.921 |
+| Brier (calibration) | 0.077 | 0.126 | — |
+
+**Weaknesses found.** Both models clear the PR-AUC gate but only just (0.941 and
+0.936 vs 0.921), and ROC-AUC near 0.6 shows the ranking signal is weak —
+consistent with the dataset note that no single column predicts the label well.
+At a 0.5 threshold Random Forest flags everyone positive (negative-class recall
+0.000); XGBoost's `scale_pos_weight` catches some negatives (0.299) at the cost
+of accuracy and calibration, but neither is usable as a 0.5 cutoff. **Members
+must be prioritized by rank (top-K), per [Priority bands](#6-priority-bands)**,
+not a fixed threshold. No model is retired here: the comparison informs the
+downstream choice; it does not automatically replace one with the other. The
+logistic-regression
+"top reasons from signed weights" interpretation does not carry over — Random
+Forest exposes global `feature_importances_`, not per-member signed
+contributions — so per-member explanations are deferred to the scoring stage.
+
 ## Training
 
 Training is a build step. The input is our prepared table of member rows.

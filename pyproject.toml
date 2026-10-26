@@ -1,7 +1,7 @@
 [project]
 name = "mh-risk-outreach"
 version = "0.1.0"
-description = "This project develops a prototype mental health outreach decision-support system that uses ETL and SQL to process member data, apply rule-based risk scoring, prioritize higher-risk patients, recommend outreach actions, and record short-term outreach outcomes."
+description = "This project develops a prototype mental health outreach decision-support system that uses ETL and SQL to process member data, apply machine-learning risk scoring with rule-based safety overrides, prioritize higher-risk patients, recommend outreach actions, and record short-term outreach outcomes."
 readme = "README.md"
 authors = [
     { name = "jonpauljah" },
@@ -44,7 +44,11 @@ module = ["sklearn.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# xgboost ships no type information. Added for the model comparison in #15;
-# nothing imports it yet on this branch.
+# xgboost ships no type information. Used by the XGBoost model (#24).
 module = ["xgboost.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# joblib ships no py.typed marker. Used to save/load the trained model (#15).
+module = ["joblib.*"]
 ignore_missing_imports = true
