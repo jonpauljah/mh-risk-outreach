@@ -54,7 +54,23 @@
    `uv run streamlit run src/mh_risk_outreach/ui/app.py`. The display reads from
    `patients.db`; if it is empty, the page explains how to populate it.
 
-5. Run the baseline test:
+5. Train and evaluate the risk models:
+
+   With the database populated (step 4), train a model. It fits on the training
+   split, evaluates on the held-out split, prints a report comparing it to the
+   majority baseline, saves the fitted model under `artifacts/<name>/`, and
+   writes the metrics to a results table named after the model:
+
+   ```bash
+   uv run python -m mh_risk_outreach.models.train --model random_forest
+   uv run python -m mh_risk_outreach.models.train --model xgboost
+   ```
+
+   Omit `--model` to train the default (Random Forest). See the
+   [ML spec](docs/ml-spec.md) for the model framework, the metric definitions,
+   and the measured results.
+
+6. Run the baseline test:
 
    ```bash
    uv run pytest
@@ -72,7 +88,7 @@
 
    See [development dependency commands](docs/dependencies/dev-dependencies.md#local-commands) for linting, formatting, type checking, and testing.
 
-6. Initialize the pre-push hooks:
+7. Initialize the pre-push hooks:
 
    ```bash
    uv run prek install --hook-type pre-push

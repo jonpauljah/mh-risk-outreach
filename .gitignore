@@ -224,3 +224,6 @@ __marimo__/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+
+# Saved model artifacts (trained model + metadata; reproducible from code)
+artifacts/
