@@ -495,7 +495,12 @@ above. A worklist where 97% of members are HIGH tells a case manager nothing.
 take the top K members, or define bands by position (for example, top 10% is
 HIGH).
 
-**Decision needed:** the value of K or the band percentages.
+**Decided (issue #16):** bands are learned from the score distribution by
+K-means (`k=5`: Very High … Very Low) rather than fixed score cutoffs or fixed
+percentages, so no threshold is chosen in advance. The order within the worklist
+is a strict `rank_priority`, with the critical-indicator override pinning
+self-harm / suicidal members to the top. Quantile bands remain the documented
+fallback if the clusters prove too lopsided. See [Risk scoring](risk-scoring.md).
 
 #### 7. Versioning
 
@@ -511,14 +516,28 @@ test results. Store the version name next to every score in the database.
 
 Scoring is how the trained model is used in the pipeline.
 
-1. Load the current model file.
-2. Read member rows from the database and run them through `prepare()`.
-3. The model returns a score from 0 to 100 for each member.
-4. Apply the safety override: any member with `Self_Harm_Thoughts = 1` or
-   `Suicidal_Thoughts = 1` is placed at the top priority regardless of score.
-5. Sort members by score and assign priority by rank.
-6. Write the score, priority, top reasons, and model version back to the
-   database for the Prioritization stage.
+1. Load the current model file (the saved `prepare → model` pipeline).
+2. Read member rows from the database; preparation runs inside the pipeline.
+3. The model returns a `risk_score` from 0 to 100 for each member.
+4. Assign a risk band (Very High … Very Low) by K-means on the scores, so the
+   band boundaries are learned from the data, not fixed in advance.
+5. Apply the safety override: any member with `Self_Harm_Thoughts = 1` or
+   `Suicidal_Thoughts = 1` is forced to the Very High band and the top of the
+   order regardless of score (`risk_score` is left raw so the override shows).
+6. Order members into a strict `rank_priority` (1 = contact first): criticals,
+   then by band, then by score.
+7. Build a short `reasoning` string from the model's SHAP contributions.
+8. Write `risk_score`, `band_level_priority`, `rank_priority`, `reasoning`, and
+   `model_version` to the database for the Prioritization stage.
+
+**Implementation (issue #16).** `mh_risk_outreach.scoring` produces the worklist
+and `mh_risk_outreach.reasons` turns SHAP contributions into readable text;
+`mh_risk_outreach.db.scores` writes one `<model>_scores` table per model
+(`logistic_regression_scores`, `random_forest_scores`, `xgboost_scores`), each
+replaced in a single transaction per run. Run it with
+`uv run python -m mh_risk_outreach.scoring --model <name>` (or `--model all`).
+The full design and the decisions behind the bands, the override, and the table
+columns are in [Risk scoring](risk-scoring.md).
 
 # Testing
 
@@ -581,17 +600,20 @@ baseline.
 
 # Interpreting Outputs
 
-Logistic regression learns one weight per column. A positive weight means
-the column pushes the score up. A negative weight pushes it down. A larger
-weight means a stronger push.
+Reasons come from **SHAP** (issue #16): for one member it gives a signed
+contribution per prepared column — how much that column pushed the score up or
+down. We take the columns that pushed the score up the most, map each back to a
+readable phrase ("low social support", "high work stress"), and store the top
+few as the member's `reasoning`. One engine covers every model:
+`shap.LinearExplainer` for logistic regression, `shap.TreeExplainer` for Random
+Forest and XGBoost.
 
-For one member, we multiply each weight by that member's value in the
-column. The three largest results are the top reasons for the score. These
-are stored with the score and shown to the case manager, for example "low
-social support" or "high work stress".
-
-This is why logistic regression is the first model: the reasons come
-directly from the model with no extra library.
+For logistic regression this is the same "top reasons" as its signed weights:
+SHAP's linear contribution equals the column's weight × (value − training mean).
+So the interpretable-baseline story still holds — logistic regression's reasons
+can be read straight from its coefficients — and SHAP simply gives one
+consistent way to produce them for the tree models too. See
+[Risk scoring](risk-scoring.md) for the phrase mapping.
 
 # Observability
 
@@ -633,7 +655,9 @@ XGBoost on the same split and compare all three on PR-AUC.
 
 - What `prepare()` does with a blank or unknown value in each column:
   reject the row or fill a default.
-- How priority is assigned: top K members, or bands by percentage.
+- ~~How priority is assigned: top K members, or bands by percentage.~~
+  **Decided (issue #16):** K-means risk bands plus a strict `rank_priority`,
+  with the critical-indicator override; see [Risk scoring](risk-scoring.md).
 - Where model files and the log table are stored. (Train/evaluation datasets
   need no such decision: `datasets.split_dataset` produces them in memory from
   the stored rows with a fixed seed, so they are reproduced on demand rather

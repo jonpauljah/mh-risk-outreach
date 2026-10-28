@@ -71,7 +71,23 @@
    [ML spec](docs/ml-spec.md) for the model framework, the metric definitions,
    and the measured results.
 
-6. Run the baseline test:
+6. Score members and build the outreach worklist:
+
+   With a model trained (step 5), score members and write the worklist to a
+   `<model>_scores` table. Each row gets a `risk_score`, a risk band
+   (`band_level_priority`), a strict `rank_priority`, and a short SHAP-based
+   `reasoning`, with self-harm / suicidal members forced to the top:
+
+   ```bash
+   uv run python -m mh_risk_outreach.scoring --model logistic_regression
+   uv run python -m mh_risk_outreach.scoring --model all
+   ```
+
+   By default this scores the held-out evaluation rows; add `--scope all` to
+   score every stored member. See [Risk scoring](docs/risk-scoring.md) for the
+   band, override, and reason rules.
+
+7. Run the baseline test:
 
    ```bash
    uv run pytest
@@ -89,7 +105,7 @@
 
    See [development dependency commands](docs/dependencies/dev-dependencies.md#local-commands) for linting, formatting, type checking, and testing.
 
-7. Initialize the pre-push hooks:
+8. Initialize the pre-push hooks:
 
    ```bash
    uv run prek install --hook-type pre-push
