@@ -1,8 +1,7 @@
-"""Random Forest — the first risk model (issue #15).
+"""Random Forest — a comparison model against Logistic Regression (issue #15).
 
-Chosen over logistic regression as the first implemented model. It is supervised,
-gives usable probabilities to rank members by, and handles the ~92% positive rate
-with ``class_weight="balanced"``. The whole model is the two lines below; the
+It is supervised, gives usable probabilities to rank members by, and handles the
+~92% positive rate with ``class_weight="balanced"``. The whole model is the two lines below; the
 shared framework (``base.RiskModel``, ``train``) does the rest.
 """
 

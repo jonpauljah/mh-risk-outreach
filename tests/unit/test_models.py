@@ -12,8 +12,9 @@ from mh_risk_outreach.db.results import (
     save_model_results,
 )
 from mh_risk_outreach.evaluation import majority_baseline
-from mh_risk_outreach.models import REGISTRY
+from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.base import RiskModel
+from mh_risk_outreach.models.logistic_regression import LogisticRegressionRiskModel
 from mh_risk_outreach.models.random_forest import RandomForestRiskModel
 from mh_risk_outreach.models.train import save_artifact, train_and_evaluate
 from mh_risk_outreach.models.xgboost_model import XGBoostRiskModel
@@ -37,9 +38,33 @@ def rf_result(records: pd.DataFrame):
     return train_and_evaluate(RandomForestRiskModel(), records)
 
 
-def test_both_models_are_registered() -> None:
+def test_all_models_are_registered() -> None:
+    assert REGISTRY["logistic_regression"] is LogisticRegressionRiskModel
     assert REGISTRY["random_forest"] is RandomForestRiskModel
     assert REGISTRY["xgboost"] is XGBoostRiskModel
+
+
+def test_logistic_regression_is_the_default_model() -> None:
+    """The MVP path trains logistic regression unless another model is asked for."""
+    assert DEFAULT_MODEL == "logistic_regression"
+
+
+def test_logistic_regression_trains_and_beats_the_baseline(records) -> None:
+    """Logistic regression clears the PR-AUC gate with valid probabilities."""
+    result = train_and_evaluate(LogisticRegressionRiskModel(), records)
+
+    probs = result.pipeline.predict_proba(records)[:, 1]
+    assert np.all((probs >= 0.0) & (probs <= 1.0))
+    baseline = majority_baseline(records[TARGET])
+    assert result.results_row["pr_auc"] >= baseline["pr_auc"]
+
+
+def test_logistic_regression_has_one_weight_per_prepared_column(records) -> None:
+    """The per-member top reasons depend on one signed weight per column."""
+    result = train_and_evaluate(LogisticRegressionRiskModel(), records)
+
+    coefficients = result.pipeline.named_steps["model"].coef_
+    assert coefficients.shape == (1, result.metadata["prepared_column_count"])
 
 
 def test_xgboost_trains_and_beats_the_baseline(records) -> None:

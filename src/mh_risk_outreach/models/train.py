@@ -7,7 +7,7 @@ the fitted pipeline with reproducibility metadata, and write one row to the
 model's own results table. Adding a model changes nothing here.
 
 Run it:
-    uv run python -m mh_risk_outreach.models.train               # random_forest
+    uv run python -m mh_risk_outreach.models.train               # logistic_regression
     uv run python -m mh_risk_outreach.models.train --model random_forest
 """
 
@@ -37,7 +37,7 @@ from mh_risk_outreach.evaluation import (
     majority_baseline,
 )
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
-from mh_risk_outreach.models import REGISTRY
+from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.base import RiskModel
 from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
 
@@ -115,7 +115,7 @@ def save_artifact(
 
 
 def run(
-    model_name: str = "random_forest",
+    model_name: str = DEFAULT_MODEL,
     *,
     db_path: str = DEFAULT_DB_PATH,
     table: str = DEFAULT_TABLE,
@@ -141,7 +141,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train and evaluate a risk model.")
     parser.add_argument(
-        "--model", default="random_forest", choices=sorted(REGISTRY), help="model to train"
+        "--model", default=DEFAULT_MODEL, choices=sorted(REGISTRY), help="model to train"
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite path")
     parser.add_argument("--table", default=DEFAULT_TABLE, help="source records table")

@@ -281,12 +281,11 @@ section records the decision that drives it.
 
 ### First model and model framework (issue #15)
 
-**Decision: Random Forest is the first *implemented* model, not logistic
-regression.** The earlier sections keep logistic regression as the interpretable
-baseline on paper, but the first trained-and-evaluated model is Random Forest
-(`class_weight="balanced"` for the ~92% positive rate). XGBoost is now implemented
-too (issue #24) and compared against Random Forest and the majority baseline on
-the same split, inputs, and metrics.
+**Logistic regression is the first model and the default**, as planned in the
+[Summary](#summary): it is the MVP model and the interpretable baseline. Random
+Forest (`class_weight="balanced"`) and XGBoost (issue #24) are implemented as
+comparison models and evaluated against it and the majority baseline on the same
+split, inputs, and metrics.
 
 **The model framework is open for extension, closed for modification.** A model
 is defined by just two things — a name and an unfitted estimator — so adding the
@@ -296,9 +295,10 @@ persistence code.
 | Piece | File | Role |
 | --- | --- | --- |
 | `RiskModel` (ABC) | `models/base.py` | Sets the contract: a `name` and `build_estimator()`; `build_pipeline()` puts `build_preparation_pipeline()` (issue #12) in front of the estimator. |
-| `RandomForestRiskModel` | `models/random_forest.py` | The whole first model: a name and a `RandomForestClassifier`. |
-| `XGBoostRiskModel` | `models/xgboost_model.py` | The second model, added the same way: a name and an `XGBClassifier` (`scale_pos_weight` for the imbalance). |
-| `REGISTRY` | `models/__init__.py` | `name -> class`. The name is also the results-table and artifact-folder name. |
+| `LogisticRegressionRiskModel` | `models/logistic_regression.py` | The first (default) model: a name and a `LogisticRegression` (no class weighting, so its probabilities stay calibrated). |
+| `RandomForestRiskModel` | `models/random_forest.py` | Comparison model: a name and a `RandomForestClassifier`. |
+| `XGBoostRiskModel` | `models/xgboost_model.py` | Comparison model, added the same way: a name and an `XGBClassifier` (`scale_pos_weight` for the imbalance). |
+| `REGISTRY` | `models/__init__.py` | `name -> class`. The name is also the results-table and artifact-folder name. `DEFAULT_MODEL` is `logistic_regression`. |
 | Training workflow | `models/train.py` | Load → `split_dataset` (issue #14) → fit on train only → score held-out rows → measure → save artifact → write the results row. Works for any `RiskModel`. |
 | Metrics | `evaluation.py` | `evaluate_scores` and `majority_baseline`; pure functions, fit nothing. |
 | Results store | `db/results.py` | `save_model_results(metrics, table=<model name>)` creates a per-model table and appends one row per run. |
@@ -306,9 +306,9 @@ persistence code.
 **Adding a second model is two edits:** write a `RiskModel` subclass in its own
 module, then add one line to `REGISTRY`. It automatically gets its own results
 table named after it. Run a model with
-`uv run python -m mh_risk_outreach.models.train --model <name>`. XGBoost was
-added exactly this way — a new `models/xgboost_model.py` and one `REGISTRY` line,
-with no change to the training, evaluation, or persistence code. (A clustering
+`uv run python -m mh_risk_outreach.models.train --model <name>`. XGBoost and
+logistic regression were each added exactly this way — a new module and one
+`REGISTRY` line, with no change to the training, evaluation, or persistence code. (A clustering
 model such as K-means does **not** fit this framework: it is unsupervised, has no
 `predict_proba`, and cannot be scored on recall/precision/PR-AUC, so it belongs
 in a separate segmentation step, as the model-choice analysis above concludes.)
@@ -322,29 +322,35 @@ plus reproducibility fields (`run_at`, `model_version`, `n_train`, `n_eval`,
 
 **Measured results** (8,000 train / 2,000 eval, seed 42):
 
-| Measure | Random Forest | XGBoost | Majority baseline |
-| --- | --- | --- | --- |
-| PR-AUC (the gate) | 0.941 | 0.936 | 0.921 |
-| ROC-AUC | 0.635 | 0.608 | 0.5 |
-| Recall @0.5 | 1.000 | 0.887 | 1.000 |
-| Precision @0.5 | 0.921 | 0.937 | 0.921 |
-| Negative-class recall @0.5 | 0.000 | 0.299 | 0.000 |
-| Accuracy @0.5 | 0.921 | 0.841 | 0.921 |
-| Brier (calibration) | 0.077 | 0.126 | — |
+| Measure | Logistic regression | Random Forest | XGBoost | Majority baseline |
+| --- | --- | --- | --- | --- |
+| PR-AUC (the gate) | **0.947** | 0.941 | 0.936 | 0.921 |
+| ROC-AUC | **0.638** | 0.635 | 0.608 | 0.5 |
+| Recall @0.5 | 1.000 | 1.000 | 0.887 | 1.000 |
+| Precision @0.5 | 0.921 | 0.921 | 0.937 | 0.921 |
+| Negative-class recall @0.5 | 0.000 | 0.000 | 0.299 | 0.000 |
+| Accuracy @0.5 | 0.921 | 0.921 | 0.841 | 0.921 |
+| Brier (calibration) | **0.070** | 0.077 | 0.126 | — |
 
-**Weaknesses found.** Both models clear the PR-AUC gate but only just (0.941 and
-0.936 vs 0.921), and ROC-AUC near 0.6 shows the ranking signal is weak —
+**Logistic regression does best on every ranking and calibration measure**, so
+the added complexity of Random Forest and XGBoost buys nothing on this data.
+Weighting logistic regression with `class_weight="balanced"` was also tried: it
+leaves the ranking unchanged (PR-AUC 0.946) but wrecks calibration (Brier 0.231),
+so the default unweighted model is kept.
+
+**Weaknesses found.** All three models clear the PR-AUC gate but only just
+(0.936–0.947 vs 0.921), and ROC-AUC near 0.6 for three very different model
+families shows the limit is the signal in the data, not the algorithm —
 consistent with the dataset note that no single column predicts the label well.
-At a 0.5 threshold Random Forest flags everyone positive (negative-class recall
-0.000); XGBoost's `scale_pos_weight` catches some negatives (0.299) at the cost
-of accuracy and calibration, but neither is usable as a 0.5 cutoff. **Members
-must be prioritized by rank (top-K), per [Priority bands](#6-priority-bands)**,
-not a fixed threshold. No model is retired here: the comparison informs the
-downstream choice; it does not automatically replace one with the other. The
-logistic-regression
-"top reasons from signed weights" interpretation does not carry over — Random
-Forest exposes global `feature_importances_`, not per-member signed
-contributions — so per-member explanations are deferred to the scoring stage.
+At a 0.5 threshold logistic regression and Random Forest flag everyone positive
+(negative-class recall 0.000); XGBoost's `scale_pos_weight` catches some
+negatives (0.299) at the cost of accuracy and calibration, but none is usable as
+a 0.5 cutoff. **Members must be prioritized by rank (top-K), per
+[Priority bands](#6-priority-bands)**, not a fixed threshold. No model is retired
+here: the comparison informs the downstream choice, which remains an explicit
+team decision. Logistic regression keeps the per-member "top reasons from signed
+weights" of [Interpreting Outputs](#interpreting-outputs); Random Forest and
+XGBoost expose only global feature importances.
 
 ## Training
 

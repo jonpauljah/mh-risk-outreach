@@ -62,11 +62,12 @@
    writes the metrics to a results table named after the model:
 
    ```bash
+   uv run python -m mh_risk_outreach.models.train --model logistic_regression
    uv run python -m mh_risk_outreach.models.train --model random_forest
    uv run python -m mh_risk_outreach.models.train --model xgboost
    ```
 
-   Omit `--model` to train the default (Random Forest). See the
+   Omit `--model` to train the default (logistic regression). See the
    [ML spec](docs/ml-spec.md) for the model framework, the metric definitions,
    and the measured results.
 
