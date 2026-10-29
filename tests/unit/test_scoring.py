@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID
+from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.scores import (
     load_member_scores,
     save_member_scores,
@@ -56,13 +57,21 @@ def records() -> pd.DataFrame:
 
 
 @pytest.fixture(scope="module")
+def background(records: pd.DataFrame) -> pd.DataFrame:
+    """The training rows train_and_evaluate fits on: the SHAP reference set."""
+    return split_dataset(records).train
+
+
+@pytest.fixture(scope="module")
 def lr_pipeline(records: pd.DataFrame):
     return train_and_evaluate(LogisticRegressionRiskModel(), records).pipeline
 
 
 @pytest.fixture(scope="module")
-def worklist(records: pd.DataFrame, lr_pipeline) -> pd.DataFrame:
-    return score_members(records, lr_pipeline, model_version="test_v1")
+def worklist(records: pd.DataFrame, lr_pipeline, background) -> pd.DataFrame:
+    return score_members(
+        records, lr_pipeline, model_version="test_v1", background=background
+    )
 
 
 def test_scores_are_0_to_100_one_row_per_member(records, worklist) -> None:
@@ -92,7 +101,7 @@ def test_critical_indicators_take_the_top_priority(records, worklist) -> None:
 
 
 def test_a_low_scoring_critical_member_is_still_top_priority(
-    records, lr_pipeline
+    records, lr_pipeline, background
 ) -> None:
     """The override wins even when the model score is low."""
     calm = records.sort_values("Has_Mental_Health_Issue").iloc[0].copy()
@@ -103,14 +112,18 @@ def test_a_low_scoring_critical_member_is_still_top_priority(
     frame = pd.concat([records, pd.DataFrame([calm])], ignore_index=True)
     frame[MEMBER_ID] = range(1, len(frame) + 1)
 
-    result = score_members(frame, lr_pipeline, model_version="test_v1")
+    result = score_members(
+        frame, lr_pipeline, model_version="test_v1", background=background
+    )
     flagged = result[result[MEMBER_ID] == frame[MEMBER_ID].iloc[-1]].iloc[0]
     assert flagged["band_level_priority"] == TOP_BAND
     assert flagged["rank_priority"] <= (result["band_level_priority"] == TOP_BAND).sum()
     assert "critical indicator" in flagged["reasoning"]
 
 
-def test_maxed_symptoms_score_higher_than_zeroed(records, lr_pipeline) -> None:
+def test_maxed_symptoms_score_higher_than_zeroed(
+    records, lr_pipeline, background
+) -> None:
     base = records.iloc[0].copy()
     high, low = base.copy(), base.copy()
     for column in SYMPTOM_COLUMNS:
@@ -119,9 +132,9 @@ def test_maxed_symptoms_score_higher_than_zeroed(records, lr_pipeline) -> None:
     frame = pd.DataFrame([high, low])
     frame[MEMBER_ID] = [1, 2]
 
-    scored = score_members(frame, lr_pipeline, model_version="test_v1").set_index(
-        MEMBER_ID
-    )
+    scored = score_members(
+        frame, lr_pipeline, model_version="test_v1", background=background
+    ).set_index(MEMBER_ID)
     assert scored.loc[1, "risk_score"] > scored.loc[2, "risk_score"]
 
 
@@ -142,16 +155,38 @@ def test_assign_bands_is_reproducible_and_ordered() -> None:
     assert np.all(np.diff(band_rank) >= 0)
 
 
-def test_scoring_is_deterministic(records, lr_pipeline) -> None:
-    a = score_members(records, lr_pipeline, model_version="test_v1")
-    b = score_members(records, lr_pipeline, model_version="test_v1")
+def test_scoring_is_deterministic(records, lr_pipeline, background) -> None:
+    a = score_members(
+        records, lr_pipeline, model_version="test_v1", background=background
+    )
+    b = score_members(
+        records, lr_pipeline, model_version="test_v1", background=background
+    )
     pd.testing.assert_frame_equal(a, b)
 
 
-def test_random_forest_also_scores_and_explains(records) -> None:
+def test_reasons_do_not_depend_on_the_batch(
+    records, lr_pipeline, background, worklist
+) -> None:
+    """A member scored alone gets the same reason as when scored with everyone."""
+    for member in records[MEMBER_ID].iloc[:5]:
+        alone = score_members(
+            records[records[MEMBER_ID] == member],
+            lr_pipeline,
+            model_version="test_v1",
+            background=background,
+        )
+        in_batch = worklist[worklist[MEMBER_ID] == member]
+        assert alone["reasoning"].iloc[0] == in_batch["reasoning"].iloc[0]
+        assert alone["reasoning"].iloc[0] != "no strong risk factors identified"
+
+
+def test_random_forest_also_scores_and_explains(records, background) -> None:
     """A tree model drops into the same scoring path (TreeExplainer reasons)."""
     pipeline = train_and_evaluate(RandomForestRiskModel(), records).pipeline
-    result = score_members(records, pipeline, model_version="rf_test")
+    result = score_members(
+        records, pipeline, model_version="rf_test", background=background
+    )
     assert result["risk_score"].between(0, 100).all()
     assert (result["reasoning"].str.len() > 0).all()
 

@@ -82,16 +82,25 @@ def _prepared_frame(pipeline: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
     return pipeline.named_steps["prepare"].transform(records)
 
 
-def shap_contributions(model: object, prepared: pd.DataFrame) -> np.ndarray:
+def shap_contributions(
+    model: object, prepared: pd.DataFrame, background: pd.DataFrame
+) -> np.ndarray:
     """Return signed contributions toward the positive class, shape (n_rows, 44).
 
     A positive value means the column pushed that member's risk score up. The
     explainer is chosen from the model: ``LinearExplainer`` for a linear model
     (it exposes ``coef_``), ``TreeExplainer`` for the forest and XGBoost. Tree
     explainers return a per-class array; we keep the positive class.
+
+    ``background`` is the prepared training rows: the "typical member" each
+    contribution is measured from. Using the training rows (not the rows being
+    scored) keeps a member's reasons the same whether they are scored alone or
+    in any batch. All rows are kept because only their mean matters for a linear
+    model. Tree explainers use the statistics stored in the fitted trees instead.
     """
     if hasattr(model, "coef_"):
-        explainer = shap.LinearExplainer(model, prepared)
+        masker = shap.maskers.Independent(background, max_samples=len(background))
+        explainer = shap.LinearExplainer(model, masker)
     else:
         explainer = shap.TreeExplainer(model)
     values = np.asarray(explainer(prepared).values)
@@ -122,16 +131,25 @@ def _describe(column: str, value: float) -> str | None:
 
 
 def build_reasons(
-    pipeline: Pipeline, records: pd.DataFrame, *, top_n: int = DEFAULT_TOP_N
+    pipeline: Pipeline,
+    records: pd.DataFrame,
+    background: pd.DataFrame,
+    *,
+    top_n: int = DEFAULT_TOP_N,
 ) -> list[str]:
     """Return one readable reason string per row in ``records``.
 
     For each member the ``top_n`` columns with the largest positive SHAP
     contribution are turned into phrases and joined. If nothing pushed the score
-    up, the reason is "no strong risk factors identified".
+    up, the reason is "no strong risk factors identified". ``background`` is the
+    raw training rows the pipeline was fitted on (see ``shap_contributions``).
     """
     prepared = _prepared_frame(pipeline, records)
-    contributions = shap_contributions(pipeline.named_steps["model"], prepared)
+    contributions = shap_contributions(
+        pipeline.named_steps["model"],
+        prepared,
+        _prepared_frame(pipeline, background),
+    )
     columns = list(prepared.columns)
     values = prepared.to_numpy(dtype=float)
 

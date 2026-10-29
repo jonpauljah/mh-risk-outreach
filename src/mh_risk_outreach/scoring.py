@@ -103,17 +103,23 @@ def assign_bands(scores: np.ndarray) -> np.ndarray:
 
 
 def score_members(
-    records: pd.DataFrame, pipeline: Pipeline, *, model_version: str
+    records: pd.DataFrame,
+    pipeline: Pipeline,
+    *,
+    model_version: str,
+    background: pd.DataFrame,
 ) -> pd.DataFrame:
     """Score ``records`` and return the worklist DataFrame for one model.
 
-    Columns: ``Member_ID``, ``model_version``, ``risk_score`` (0-100),
+    ``background`` is the training rows the pipeline was fitted on; the SHAP
+    reasons measure each member against them, so a member's reasons do not depend
+    on which other members are scored alongside them. Columns: ``Member_ID``, ``model_version``, ``risk_score`` (0-100),
     ``band_level_priority``, ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
     """
     risk_score = pipeline.predict_proba(records)[:, 1] * 100.0
     bands = assign_bands(risk_score)
-    reasons = build_reasons(pipeline, records)
+    reasons = build_reasons(pipeline, records, background)
 
     critical = np.zeros(len(records), dtype=bool)
     for column in CRITICAL_INDICATORS:
@@ -184,10 +190,13 @@ def run(
     honest demonstration); ``scope="all"`` scores every stored member.
     """
     records = load_from_db(db_path, table)
-    target = split_dataset(records).evaluation if scope == "evaluation" else records
+    split = split_dataset(records)
+    target = split.evaluation if scope == "evaluation" else records
 
     pipeline, model_version = load_scoring_pipeline(model_name, artifacts_dir)
-    worklist = score_members(target, pipeline, model_version=model_version)
+    worklist = score_members(
+        target, pipeline, model_version=model_version, background=split.train
+    )
     save_member_scores(worklist, model_name, db_path=db_path)
 
     print(_summary(model_name, worklist))
