@@ -181,6 +181,25 @@ def test_reasons_do_not_depend_on_the_batch(
         assert alone["reasoning"].iloc[0] != "no strong risk factors identified"
 
 
+def test_chunked_scoring_reports_progress_and_matches(
+    records, lr_pipeline, background, worklist
+) -> None:
+    """Explaining in chunks reports rising progress to 1.0 and changes nothing."""
+    seen: list[float] = []
+    chunked = score_members(
+        records,
+        lr_pipeline,
+        model_version="test_v1",
+        background=background,
+        progress=seen.append,
+        chunk_size=7,
+    )
+    pd.testing.assert_frame_equal(chunked, worklist)
+    assert seen == sorted(seen)
+    assert seen[-1] == pytest.approx(1.0)
+    assert len(seen) == -(-len(records) // 7)  # one call per chunk
+
+
 def test_random_forest_also_scores_and_explains(records, background) -> None:
     """A tree model drops into the same scoring path (TreeExplainer reasons)."""
     pipeline = train_and_evaluate(RandomForestRiskModel(), records).pipeline
