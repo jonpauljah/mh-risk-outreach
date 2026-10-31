@@ -22,6 +22,7 @@ Run it:
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import joblib
@@ -43,6 +44,10 @@ from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.reasons import build_reasons
 
 DEFAULT_ARTIFACTS_DIR = "artifacts"
+
+# Members explained per SHAP call when reporting progress. SHAP is the slow step
+# (minutes for Random Forest), so it runs in chunks of this size.
+REASON_CHUNK_SIZE = 100
 
 # Lowest band first; index doubles as the within-band ordering weight.
 BAND_LABELS: tuple[str, ...] = ("Very Low", "Low", "Medium", "High", "Very High")
@@ -108,18 +113,26 @@ def score_members(
     *,
     model_version: str,
     background: pd.DataFrame,
+    progress: Callable[[float], None] | None = None,
+    chunk_size: int = REASON_CHUNK_SIZE,
 ) -> pd.DataFrame:
     """Score ``records`` and return the worklist DataFrame for one model.
 
     ``background`` is the training rows the pipeline was fitted on; the SHAP
     reasons measure each member against them, so a member's reasons do not depend
-    on which other members are scored alongside them. Columns: ``Member_ID``, ``model_version``, ``risk_score`` (0-100),
+    on which other members are scored alongside them. That also makes it safe to
+    explain members in chunks of ``chunk_size``: ``progress``, if given, is called
+    with the fraction done (0-1] after each chunk.
+
+    Columns: ``Member_ID``, ``model_version``, ``risk_score`` (0-100),
     ``band_level_priority``, ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
     """
     risk_score = pipeline.predict_proba(records)[:, 1] * 100.0
     bands = assign_bands(risk_score)
-    reasons = build_reasons(pipeline, records, background)
+    reasons = build_reasons(
+        pipeline, records, background, chunk_size=chunk_size, progress=progress
+    )
 
     critical = np.zeros(len(records), dtype=bool)
     for column in CRITICAL_INDICATORS:

@@ -83,7 +83,12 @@ def _prepared_frame(pipeline: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
 
 
 def shap_contributions(
-    model: object, prepared: pd.DataFrame, background: pd.DataFrame
+    model: object,
+    prepared: pd.DataFrame,
+    background: pd.DataFrame,
+    *,
+    chunk_size: int | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> np.ndarray:
     """Return signed contributions toward the positive class, shape (n_rows, 44).
 
@@ -97,16 +102,29 @@ def shap_contributions(
     scored) keeps a member's reasons the same whether they are scored alone or
     in any batch. All rows are kept because only their mean matters for a linear
     model. Tree explainers use the statistics stored in the fitted trees instead.
+
+    The explainer is built once; with ``chunk_size`` the rows are explained in
+    chunks of that size and ``progress`` is called with the fraction done (0-1]
+    after each one. Because the background is fixed, chunking changes nothing.
     """
     if hasattr(model, "coef_"):
         masker = shap.maskers.Independent(background, max_samples=len(background))
         explainer = shap.LinearExplainer(model, masker)
     else:
         explainer = shap.TreeExplainer(model)
-    values = np.asarray(explainer(prepared).values)
-    if values.ndim == 3:  # (rows, columns, classes) -> positive class
-        values = values[..., 1]
-    return values
+
+    size = chunk_size or max(len(prepared), 1)
+    chunks = []
+    for start in range(0, len(prepared), size):
+        values = np.asarray(explainer(prepared.iloc[start : start + size]).values)
+        if values.ndim == 3:  # (rows, columns, classes) -> positive class
+            values = values[..., 1]
+        chunks.append(values)
+        if progress is not None:
+            progress(min(start + size, len(prepared)) / len(prepared))
+    if not chunks:
+        return np.empty((0, prepared.shape[1]))
+    return np.concatenate(chunks)
 
 
 def _describe(column: str, value: float) -> str | None:
@@ -136,19 +154,24 @@ def build_reasons(
     background: pd.DataFrame,
     *,
     top_n: int = DEFAULT_TOP_N,
+    chunk_size: int | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> list[str]:
     """Return one readable reason string per row in ``records``.
 
     For each member the ``top_n`` columns with the largest positive SHAP
     contribution are turned into phrases and joined. If nothing pushed the score
     up, the reason is "no strong risk factors identified". ``background`` is the
-    raw training rows the pipeline was fitted on (see ``shap_contributions``).
+    raw training rows the pipeline was fitted on; ``chunk_size`` and ``progress``
+    are passed to ``shap_contributions``.
     """
     prepared = _prepared_frame(pipeline, records)
     contributions = shap_contributions(
         pipeline.named_steps["model"],
         prepared,
         _prepared_frame(pipeline, background),
+        chunk_size=chunk_size,
+        progress=progress,
     )
     columns = list(prepared.columns)
     values = prepared.to_numpy(dtype=float)
