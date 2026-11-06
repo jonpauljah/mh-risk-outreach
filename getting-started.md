@@ -85,7 +85,14 @@
 
    By default this scores the held-out evaluation rows; add `--scope all` to
    score every stored member. See [Risk scoring](docs/risk-scoring.md) for the
-   band, override, and reason rules.
+   band, override, and reason rules. On the Risk scoring page, **Run** replaces
+   each selected model's held-out scores table and displays the rows read back
+   from SQLite. **Reset** clears the page display only; it leaves those tables
+   in the database.
+
+   If you reimport data to the same database path while Streamlit is running,
+   restart Streamlit, then retrain and rescore the models. Reimporting during an
+   active session is unsupported.
 
 7. Run the baseline test:
 
