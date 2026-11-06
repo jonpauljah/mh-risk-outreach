@@ -211,3 +211,11 @@ Its storage half is already done here; what it adds is the interface half.
 Recommended entry point for the next branch: a `ui/pages/2_Member_worklist.py`
 that uses `scores_status` + `load_member_scores`, with a button that calls
 `scoring.run(model, scope=...)` to refresh.
+
+## Issue #18 update — workflow integration
+
+The Risk scoring page now connects that workflow end to end: **Run** scores the
+held-out rows, replaces each selected model's `<model>_scores` table, and loads
+the ordered rows back from SQLite for display. The displayed model version and
+worklist therefore come from the persisted data. **Reset** clears only the
+session display; the database tables remain available to other consumers.

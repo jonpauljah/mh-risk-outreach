@@ -7,8 +7,9 @@ Run, watch a progress bar per model, then compare one worklist table per model
 
 Scoring reuses ``scoring.score_members`` on the held-out evaluation rows of the
 shared split, with the training rows as the SHAP background, exactly like
-``python -m mh_risk_outreach.scoring``. Nothing is written to the database; a
-"Train" button is offered for any model without a saved artifact.
+``python -m mh_risk_outreach.scoring``. Each run replaces the model's scores
+table and displays the rows read back from SQLite. A "Train" button is offered
+for any model without a saved artifact.
 
 Streamlit lists this page automatically beside ``ui/app.py``.
 """
@@ -22,6 +23,7 @@ import streamlit as st
 
 from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
 from mh_risk_outreach.datasets import split_dataset
+from mh_risk_outreach.db import scores as scores_db
 from mh_risk_outreach.db.repository import database_status, load_from_db
 from mh_risk_outreach.models import REGISTRY
 from mh_risk_outreach.models import train as model_training
@@ -90,8 +92,9 @@ def _run_scoring(
     members: pd.DataFrame,
     background: pd.DataFrame,
     artifacts_dir: str,
+    db_path: str,
 ) -> dict[str, dict]:
-    """Score ``members`` with each model, updating one progress bar per model."""
+    """Score, persist, and reload ``members`` for each model's worklist."""
     bars = {name: st.progress(0.0, text=f"{name}: waiting") for name in names}
     results: dict[str, dict] = {}
     for name in names:
@@ -106,16 +109,18 @@ def _run_scoring(
 
         bar.progress(0.0, text=f"{name}: scoring {len(members):,} members")
         start = time.perf_counter()
-        worklist = score_members(
+        computed = score_members(
             members,
             pipeline,
             model_version=version,
             background=background,
             progress=update,
         )
+        scores_db.save_member_scores(computed, name, db_path=db_path)
+        worklist = scores_db.load_member_scores(name, db_path=db_path)
         results[name] = {
             "worklist": worklist,
-            "model_version": version,
+            "model_version": str(worklist["model_version"].iat[0]),
             "seconds": time.perf_counter() - start,
         }
         bar.progress(1.0, text=f"{name}: done")
@@ -221,7 +226,7 @@ def main() -> None:
     if action.button("Run", type="primary"):
         action.empty()
         st.session_state[RESULTS_KEY] = _run_scoring(
-            names, members, split.train, DEFAULT_ARTIFACTS_DIR
+            names, members, split.train, DEFAULT_ARTIFACTS_DIR, DEFAULT_DB_PATH
         )
         st.rerun()
 
