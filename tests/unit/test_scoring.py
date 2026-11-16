@@ -7,6 +7,8 @@ valid scores, the critical-indicator override, monotonic reasons, reproducible
 bands, and a stable worklist order.
 """
 
+import sqlite3
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -233,6 +235,22 @@ def test_saving_scores_rejects_a_missing_column(worklist, tmp_path) -> None:
         save_member_scores(
             worklist.drop(columns=["reasoning"]), "logistic_regression", db_path=db
         )
+
+
+def test_failed_score_write_preserves_previous_table(worklist, tmp_path) -> None:
+    db = str(tmp_path / "scores.db")
+    save_member_scores(worklist, "logistic_regression", db_path=db)
+    before = load_member_scores("logistic_regression", db_path=db)
+    invalid = worklist.copy()
+    invalid.loc[invalid.index[0], "reasoning"] = None
+
+    with pytest.raises(pd.errors.DatabaseError) as error:
+        save_member_scores(invalid, "logistic_regression", db_path=db)
+
+    assert isinstance(error.value.__cause__, sqlite3.IntegrityError)
+    pd.testing.assert_frame_equal(
+        before, load_member_scores("logistic_regression", db_path=db)
+    )
 
 
 def test_scores_status_reports_missing_then_present(worklist, tmp_path) -> None:
