@@ -80,3 +80,98 @@ CREATE TABLE IF NOT EXISTS patients (
     -- Binary label from the source survey. Not a diagnosis or outreach score.
     Has_Mental_Health_Issue        INTEGER NOT NULL CHECK (Has_Mental_Health_Issue IN (0, 1))
 );
+
+-- Historical assessment snapshots are created only by explicit case or
+-- reassessment operations. Inputs contain exactly the 50 FEATURES as JSON.
+CREATE TABLE IF NOT EXISTS risk_assessments (
+    assessment_id INTEGER PRIMARY KEY,
+    Member_ID INTEGER NOT NULL REFERENCES patients(Member_ID),
+    source TEXT NOT NULL CHECK (source IN ('baseline', 'reassessment')),
+    created_at TEXT NOT NULL,
+    inputs_json TEXT NOT NULL CHECK (json_valid(inputs_json)),
+    scoring_status TEXT NOT NULL CHECK (scoring_status IN ('PendingScoring', 'Scored')),
+    risk_score REAL CHECK (risk_score IS NULL OR risk_score BETWEEN 0 AND 100),
+    band_level_priority TEXT,
+    rank_priority INTEGER,
+    rank_context_json TEXT CHECK (rank_context_json IS NULL OR json_valid(rank_context_json)),
+    explanation TEXT,
+    recommendation_action TEXT,
+    recommendation_reason TEXT,
+    recommendation_rule_version TEXT,
+    operational_model_name TEXT,
+    model_version TEXT,
+    scored_at TEXT,
+    CHECK (
+      (scoring_status = 'PendingScoring' AND risk_score IS NULL AND band_level_priority IS NULL
+       AND rank_priority IS NULL AND rank_context_json IS NULL AND explanation IS NULL
+       AND recommendation_action IS NULL AND recommendation_reason IS NULL
+       AND recommendation_rule_version IS NULL AND operational_model_name IS NULL
+       AND model_version IS NULL AND scored_at IS NULL)
+      OR
+      (scoring_status = 'Scored' AND risk_score IS NOT NULL AND band_level_priority IS NOT NULL
+       AND rank_priority IS NOT NULL AND rank_context_json IS NOT NULL AND explanation IS NOT NULL
+       AND model_version IS NOT NULL AND scored_at IS NOT NULL)
+    ),
+    UNIQUE (assessment_id, Member_ID)
+);
+CREATE INDEX IF NOT EXISTS idx_assessments_member_created
+  ON risk_assessments(Member_ID, created_at, assessment_id);
+CREATE TRIGGER IF NOT EXISTS trg_assessment_inputs_immutable
+BEFORE UPDATE OF Member_ID, source, created_at, inputs_json ON risk_assessments
+BEGIN
+    SELECT RAISE(ABORT, 'assessment identity and inputs are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_scored_assessment_immutable
+BEFORE UPDATE ON risk_assessments
+WHEN OLD.scoring_status = 'Scored'
+BEGIN
+    SELECT RAISE(ABORT, 'scored assessment is immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS outreach_cases (
+    case_id INTEGER PRIMARY KEY,
+    Member_ID INTEGER NOT NULL REFERENCES patients(Member_ID),
+    assessment_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('Pending', 'Accepted', 'Completed')),
+    outcome TEXT CHECK (outcome IS NULL OR outcome IN
+      ('Not reached', 'Reached — declined', 'Reached — engaged', 'Referral completed')),
+    recommended_action TEXT NOT NULL,
+    recommendation_reason TEXT,
+    operational_model_name TEXT,
+    model_version TEXT,
+    recommendation_rule_version TEXT,
+    selected_action TEXT,
+    accepted_action TEXT,
+    override_justification TEXT,
+    created_at TEXT NOT NULL,
+    accepted_at TEXT,
+    outcome_recorded_at TEXT,
+    completed_at TEXT,
+    FOREIGN KEY (assessment_id, Member_ID)
+      REFERENCES risk_assessments(assessment_id, Member_ID),
+    CHECK ((status = 'Completed' AND outcome IS NOT NULL AND outcome_recorded_at IS NOT NULL AND completed_at IS NOT NULL)
+        OR status <> 'Completed'),
+    CHECK ((status = 'Pending' AND accepted_at IS NULL)
+        OR (status IN ('Accepted', 'Completed') AND accepted_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_one_assessment
+  ON outreach_cases(assessment_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_one_active_member
+  ON outreach_cases(Member_ID) WHERE status IN ('Pending', 'Accepted');
+CREATE INDEX IF NOT EXISTS idx_cases_member_created
+  ON outreach_cases(Member_ID, created_at, case_id);
+CREATE TRIGGER IF NOT EXISTS trg_case_origin_immutable
+BEFORE UPDATE OF Member_ID, assessment_id, recommended_action, recommendation_reason,
+    operational_model_name, model_version, recommendation_rule_version, created_at
+ON outreach_cases
+BEGIN
+    SELECT RAISE(ABORT, 'case origin and recommendation are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS member_assessment_state (
+    Member_ID INTEGER PRIMARY KEY REFERENCES patients(Member_ID),
+    assessment_id INTEGER NOT NULL UNIQUE,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (assessment_id, Member_ID)
+      REFERENCES risk_assessments(assessment_id, Member_ID)
+);
