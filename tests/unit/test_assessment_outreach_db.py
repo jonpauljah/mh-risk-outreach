@@ -398,6 +398,88 @@ def test_finalization_rejects_missing_null_or_non_dict_rank_context(
     assert len(list_member_history(7, path)["assessments"]) == 2
 
 
+def _history_rows(path):
+    conn = sqlite3.connect(path)
+    try:
+        return tuple(
+            tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall())
+            for table in (
+                "risk_assessments",
+                "member_assessment_state",
+                "outreach_cases",
+            )
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("write_path", ["baseline", "finalize"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "risk_score",
+        "band_level_priority",
+        "rank_priority",
+        "explanation",
+        "model_version",
+    ],
+)
+@pytest.mark.parametrize("invalid", ["missing", None])
+def test_scoring_requires_non_null_fields_without_partial_writes(
+    database, write_path, field, invalid
+):
+    path, _ = database
+    pending_id = None
+    if write_path == "finalize":
+        create_case(7, "Contact", score(), path)
+        pending_id = submit_reassessment(7, {}, path)
+    before = _history_rows(path)
+    result = score()
+    if invalid == "missing":
+        result.pop(field)
+    else:
+        result[field] = invalid
+
+    with pytest.raises(ValueError, match=field):
+        if write_path == "baseline":
+            create_case(7, "Contact", result, path)
+        else:
+            finalize_scoring(pending_id, result, path)
+
+    assert _history_rows(path) == before
+    if pending_id is not None:
+        assert get_assessment(pending_id, path)["scoring_status"] == "PendingScoring"
+
+
+@pytest.mark.parametrize("write_path", ["baseline", "finalize"])
+@pytest.mark.parametrize(
+    ("field", "invalid", "error"),
+    [
+        ("unrecognized", "value", ValueError),
+        ("recommendation_reason", ["invalid"], TypeError),
+    ],
+)
+def test_scoring_rejects_unsupported_optional_metadata_without_partial_writes(
+    database, write_path, field, invalid, error
+):
+    path, _ = database
+    pending_id = None
+    if write_path == "finalize":
+        create_case(7, "Contact", score(), path)
+        pending_id = submit_reassessment(7, {}, path)
+    before = _history_rows(path)
+
+    with pytest.raises(error, match=field):
+        if write_path == "baseline":
+            create_case(7, "Contact", score(**{field: invalid}), path)
+        else:
+            finalize_scoring(pending_id, score(**{field: invalid}), path)
+
+    assert _history_rows(path) == before
+    if pending_id is not None:
+        assert get_assessment(pending_id, path)["scoring_status"] == "PendingScoring"
+
+
 def test_failed_case_insert_rolls_back_on_durable_file(database):
     path, _ = database
     conn = sqlite3.connect(path)

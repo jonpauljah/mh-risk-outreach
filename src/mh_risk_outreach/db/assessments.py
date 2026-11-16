@@ -79,6 +79,46 @@ def _validate_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     return {name: validated[name] for name in FEATURES}
 
 
+def _validate_scoring(scoring: dict[str, Any]) -> None:
+    """Validate a complete score before either persistence path writes it."""
+    required = {
+        "risk_score",
+        "band_level_priority",
+        "rank_priority",
+        "rank_context",
+        "explanation",
+        "model_version",
+    }
+    optional = {
+        "recommendation",
+        "recommendation_action",
+        "recommendation_reason",
+        "recommendation_rule_version",
+        "operational_model_name",
+    }
+    # A missing context has the same invalid shape as a null or scalar one.
+    if not isinstance(scoring.get("rank_context"), dict):
+        raise TypeError("rank_context must be a non-null dictionary")
+    missing = required - scoring.keys()
+    if missing:
+        raise ValueError(
+            f"scoring result is missing required fields: {sorted(missing)}"
+        )
+    null_fields = {name for name in required if scoring[name] is None}
+    if null_fields:
+        raise ValueError(
+            f"scoring result has null required fields: {sorted(null_fields)}"
+        )
+    unsupported = scoring.keys() - required - optional
+    if unsupported:
+        raise ValueError(f"unsupported scoring fields: {sorted(unsupported)}")
+    # Recommendation metadata is optional, but supplied values must fit its
+    # nullable text columns rather than failing later in the SQLite adapter.
+    for name in optional & scoring.keys():
+        if scoring[name] is not None and not isinstance(scoring[name], str):
+            raise TypeError(f"{name} must be a string or None")
+
+
 def _insert_assessment(
     conn: sqlite3.Connection,
     member_id: int,
@@ -89,10 +129,8 @@ def _insert_assessment(
     snapshot = _validate_inputs(inputs)
     scored = scoring is not None
     values = scoring or {}
-    # A fully scored baseline needs a real cohort context. json.dumps(None)
-    # would otherwise store the JSON literal "null", which is SQL NOT NULL.
-    if scored and not isinstance(values.get("rank_context"), dict):
-        raise TypeError("rank_context must be a non-null dictionary")
+    if scored:
+        _validate_scoring(values)
     cursor = conn.execute(
         """INSERT INTO risk_assessments
         (Member_ID, source, created_at, inputs_json, scoring_status, risk_score,
@@ -179,29 +217,7 @@ def finalize_scoring(
     db_path: str | Path = DEFAULT_DB_PATH,
 ) -> None:
     """Finalize the current pending assessment once with a supplied score result."""
-    required = {
-        "risk_score",
-        "band_level_priority",
-        "rank_priority",
-        "rank_context",
-        "explanation",
-        "model_version",
-    }
-    optional = {
-        "recommendation",
-        "recommendation_action",
-        "recommendation_reason",
-        "recommendation_rule_version",
-        "operational_model_name",
-    }
-    # Apply the same context shape rule as fully scored baseline creation.
-    # This also catches a missing key before the broader payload check.
-    if not isinstance(result.get("rank_context"), dict):
-        raise TypeError("rank_context must be a non-null dictionary")
-    if not required.issubset(result) or not set(result).issubset(required | optional):
-        raise ValueError(
-            f"scoring result must contain {sorted(required)} and only supported optional recommendation metadata"
-        )
+    _validate_scoring(result)
     conn = _connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
