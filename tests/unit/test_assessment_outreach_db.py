@@ -1,5 +1,6 @@
 """SQLite integration coverage for durable assessment and case history."""
 
+import json
 import sqlite3
 
 import pandas as pd
@@ -322,6 +323,79 @@ def test_case_requires_scored_snapshot_recommendation(database):
     finalize_scoring(pending, score_without_recommendation, path)
     with pytest.raises(ValueError, match="no stored recommendation"):
         create_case(7, "Caller supplied action", db_path=path)
+
+
+def test_case_reads_nullable_rank_context_for_pending_assessment(database):
+    path, inputs = database
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    # The schema permits this stored relationship even though create_case()
+    # ordinarily requires a scored assessment. Read APIs must handle it.
+    assessment_id = conn.execute(
+        """INSERT INTO risk_assessments
+           (Member_ID, source, created_at, inputs_json, scoring_status)
+           VALUES (?, 'reassessment', ?, ?, 'PendingScoring')""",
+        (7, "2026-11-16T12:00:00+00:00", json.dumps(inputs)),
+    ).lastrowid
+    case_id = conn.execute(
+        """INSERT INTO outreach_cases
+           (Member_ID, assessment_id, status, recommended_action, created_at)
+           VALUES (?, ?, 'Pending', 'Contact', ?)""",
+        (7, assessment_id, "2026-11-16T12:01:00+00:00"),
+    ).lastrowid
+    conn.commit()
+    conn.close()
+
+    assert get_case(case_id, path)["rank_context"] is None
+    history = list_member_history(7, path)
+    assert history["cases"][0]["rank_context"] is None
+    assert history["assessments"][0]["scoring_status"] == "PendingScoring"
+    assert history["assessments"][0]["rank_context"] is None
+
+
+@pytest.mark.parametrize("bad_context", ["missing", None, [], "cohort"])
+def test_first_case_rejects_missing_null_or_non_dict_rank_context(
+    database, bad_context
+):
+    path, _ = database
+    scoring = score()
+    if bad_context == "missing":
+        scoring.pop("rank_context")
+    else:
+        scoring["rank_context"] = bad_context
+
+    with pytest.raises(TypeError, match="rank_context"):
+        create_case(7, "Contact", scoring, path)
+
+    conn = sqlite3.connect(path)
+    for table in ("risk_assessments", "member_assessment_state", "outreach_cases"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("bad_context", ["missing", None, [], "cohort"])
+def test_finalization_rejects_missing_null_or_non_dict_rank_context(
+    database, bad_context
+):
+    path, _ = database
+    case_id = create_case(7, "Contact", score(), path)
+    pending_id = submit_reassessment(7, {"Age": 42}, path)
+    scoring = score()
+    if bad_context == "missing":
+        scoring.pop("rank_context")
+    else:
+        scoring["rank_context"] = bad_context
+
+    with pytest.raises(TypeError, match="rank_context"):
+        finalize_scoring(pending_id, scoring, path)
+
+    current = get_current_assessment(7, path)
+    assert current["assessment_id"] == pending_id
+    assert current["assessment"]["scoring_status"] == "PendingScoring"
+    assert current["assessment"]["risk_score"] is None
+    assert current["assessment"]["rank_context"] is None
+    assert get_case(case_id, path)["status"] == "Pending"
+    assert len(list_member_history(7, path)["assessments"]) == 2
 
 
 def test_failed_case_insert_rolls_back_on_durable_file(database):

@@ -1,4 +1,7 @@
-"""Append and retrieve immutable member assessment snapshots."""
+"""Store full survey snapshots separately from replaceable model-score rows.
+
+Reassessments are saved immediately; scoring is supplied by a later explicit run.
+"""
 
 import json
 import math
@@ -22,7 +25,9 @@ from mh_risk_outreach.db.repository import init_schema
 def _connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # SQLite foreign keys are disabled by default on each new connection.
     conn.execute("PRAGMA foreign_keys = ON")
+    # The tracked schema adds missing tables without replacing existing history.
     init_schema(conn)
     return conn
 
@@ -32,6 +37,8 @@ def _now() -> str:
 
 
 def _validate_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    # Persist the complete source-input contract, even when the form edits only
+    # a few fields. Member_ID and the source target are stored elsewhere.
     if set(inputs) != set(FEATURES):
         missing = sorted(set(FEATURES) - set(inputs))
         extra = sorted(set(inputs) - set(FEATURES))
@@ -39,6 +46,7 @@ def _validate_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
             f"inputs must contain exactly the 50 survey fields (missing={missing}, extra={extra})"
         )
     validated: dict[str, Any] = {}
+    # Normalize numeric values so JSON snapshots have stable Python types.
     for name in INTEGER_SCORES:
         value = inputs[name]
         if isinstance(value, bool) or not isinstance(value, Integral):
@@ -59,6 +67,7 @@ def _validate_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
             raise TypeError(f"{name} must be a non-null string")
         validated[name] = value
     for name in BINARY_FLAGS:
+        # These flags use the same 0/1 contract as the imported patient row.
         value = inputs[name]
         if (
             isinstance(value, bool)
@@ -80,6 +89,10 @@ def _insert_assessment(
     snapshot = _validate_inputs(inputs)
     scored = scoring is not None
     values = scoring or {}
+    # A fully scored baseline needs a real cohort context. json.dumps(None)
+    # would otherwise store the JSON literal "null", which is SQL NOT NULL.
+    if scored and not isinstance(values.get("rank_context"), dict):
+        raise TypeError("rank_context must be a non-null dictionary")
     cursor = conn.execute(
         """INSERT INTO risk_assessments
         (Member_ID, source, created_at, inputs_json, scoring_status, risk_score,
@@ -122,6 +135,8 @@ def submit_reassessment(
         raise ValueError(f"unknown survey fields: {sorted(unknown)}")
     conn = _connect(db_path)
     try:
+        # The pointer read and both writes share a write lock. This also keeps
+        # concurrent submissions from merging against an outdated snapshot.
         conn.execute("BEGIN IMMEDIATE")
         current = conn.execute(
             """SELECT a.inputs_json FROM member_assessment_state c
@@ -140,6 +155,8 @@ def submit_reassessment(
             )
         merged = json.loads(current["inputs_json"])
         merged.update(edits)
+        # Every explicit submission gets its own history row, including an
+        # unchanged submission. No outreach-case column is updated here.
         assessment_id = _insert_assessment(conn, member_id, merged, "reassessment")
         conn.execute(
             """INSERT INTO member_assessment_state(Member_ID, assessment_id, updated_at)
@@ -177,6 +194,10 @@ def finalize_scoring(
         "recommendation_rule_version",
         "operational_model_name",
     }
+    # Apply the same context shape rule as fully scored baseline creation.
+    # This also catches a missing key before the broader payload check.
+    if not isinstance(result.get("rank_context"), dict):
+        raise TypeError("rank_context must be a non-null dictionary")
     if not required.issubset(result) or not set(result).issubset(required | optional):
         raise ValueError(
             f"scoring result must contain {sorted(required)} and only supported optional recommendation metadata"
@@ -184,6 +205,8 @@ def finalize_scoring(
     conn = _connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Only the latest pending assessment may transition to Scored. A trigger
+        # prevents subsequent edits to any finalized scoring snapshot.
         cur = conn.execute(
             """UPDATE risk_assessments SET scoring_status='Scored', risk_score=?,
                band_level_priority=?, rank_priority=?, rank_context_json=?, explanation=?,
@@ -230,6 +253,7 @@ def get_assessment(
         result = dict(row)
         result["inputs"] = json.loads(result.pop("inputs_json"))
         rank_context = result.pop("rank_context_json")
+        # PendingScoring is a valid readable state with no rank context yet.
         result["rank_context"] = json.loads(rank_context) if rank_context else None
         return result
     finally:
@@ -252,6 +276,7 @@ def get_current_assessment(
         state = dict(row)
     finally:
         conn.close()
+    # Current means latest submitted; it may still be awaiting scoring.
     state["Member_ID"] = member_id
     state["assessment"] = get_assessment(state["assessment_id"], db_path)
     return state

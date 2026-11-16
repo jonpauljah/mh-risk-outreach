@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     operational_model_name TEXT,
     model_version TEXT,
     scored_at TEXT,
+    -- Pending rows deliberately carry no scoring data. A successful explicit
+    -- scoring run fills the required score fields in one guarded update.
     CHECK (
       (scoring_status = 'PendingScoring' AND risk_score IS NULL AND band_level_priority IS NULL
        AND rank_priority IS NULL AND rank_context_json IS NULL AND explanation IS NULL
@@ -128,6 +130,8 @@ BEGIN
     SELECT RAISE(ABORT, 'scored assessment is immutable');
 END;
 
+-- Cases retain the proposal and assessment used at creation. Reassessment
+-- changes current state only; it does not rewrite this historical origin.
 CREATE TABLE IF NOT EXISTS outreach_cases (
     case_id INTEGER PRIMARY KEY,
     Member_ID INTEGER NOT NULL REFERENCES patients(Member_ID),
@@ -147,6 +151,7 @@ CREATE TABLE IF NOT EXISTS outreach_cases (
     accepted_at TEXT,
     outcome_recorded_at TEXT,
     completed_at TEXT,
+    -- The composite key prevents attaching another member's assessment.
     FOREIGN KEY (assessment_id, Member_ID)
       REFERENCES risk_assessments(assessment_id, Member_ID),
     CHECK ((status = 'Completed' AND outcome IS NOT NULL AND outcome_recorded_at IS NOT NULL AND completed_at IS NOT NULL)
@@ -154,6 +159,8 @@ CREATE TABLE IF NOT EXISTS outreach_cases (
     CHECK ((status = 'Pending' AND accepted_at IS NULL)
         OR (status IN ('Accepted', 'Completed') AND accepted_at IS NOT NULL))
 );
+-- These enforce separate rules: one case per snapshot for all time, and only
+-- one open Pending/Accepted case per member at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_one_assessment
   ON outreach_cases(assessment_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_one_active_member
@@ -168,6 +175,8 @@ BEGIN
     SELECT RAISE(ABORT, 'case origin and recommendation are immutable');
 END;
 
+-- This pointer follows the latest submitted assessment, including one that
+-- still awaits scoring. Existing cases keep their original assessment_id.
 CREATE TABLE IF NOT EXISTS member_assessment_state (
     Member_ID INTEGER PRIMARY KEY REFERENCES patients(Member_ID),
     assessment_id INTEGER NOT NULL UNIQUE,
