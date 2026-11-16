@@ -80,10 +80,11 @@ Define a prototype record key because the source contains no member identifier.
 Document whether keys remain stable across repeat imports and how source rows
 can be traced. Exact duplicate rows do not establish duplicate people.
 
-**Pending for Milestone 1:** choose duplicate detection and handling, and choose
-repeat-import behavior (for example, replace the dataset contents transactionally
-or skip an already imported snapshot). Repeating an import must have a documented,
-testable outcome and must not silently accumulate duplicate records.
+The prototype assigns sequential surrogate `Member_ID` values during the first
+load. Imports are initialization-only: when the `patients` table has rows, the
+pipeline skips before reading the CSV, and the repository also guards direct
+calls. It does not match people or compare snapshots. Subsequent imports leave
+patient edits and dependent history untouched.
 
 ## Schema creation and loading
 
@@ -92,17 +93,12 @@ transformed records. That SQL file contains executable definitions for all 52
 columns with their types, the `Member_ID` primary key, NOT NULL, and
 `CHECK (… IN (0, 1))` on the 9 binary flags and the target.
 
-The load uses pandas `to_sql(table, conn, if_exists="append", index=False)`
-against the existing table. It never uses `if_exists="replace"`, which would
-discard the tracked schema and constraints. Sequencing stays in `etl/pipeline.py`
-and database access in `db/repository.py`.
-
-Repeat imports replace the table contents transactionally: `save_records`
-deletes existing rows and appends the fresh load inside one transaction
-(`with conn:`), so rows do not accumulate across runs. Any failure rolls the
-whole operation back, leaving the previously stored data intact; the load is
-reported as successful only after that transaction commits. The database path
-is `config.DEFAULT_DB_PATH` (`patients.db`).
+The repository inserts rows explicitly into the existing table. It never drops,
+replaces, or deletes patient rows. The emptiness check and inserts run under one
+immediate SQLite write transaction, which serializes concurrent imports. A
+failed first load rolls back every inserted patient row. The CLI reports a skip
+for an already populated table before attempting CSV extraction. The database
+path is `config.DEFAULT_DB_PATH` (`patients.db`).
 
 ## Processing log or summary
 

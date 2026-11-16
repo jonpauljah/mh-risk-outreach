@@ -50,6 +50,10 @@
    uv run mh-risk-outreach
    ```
 
+   The import initializes an empty `patients` table. If it already contains
+   rows, the import reports a skip before reading the CSV and preserves the
+   stored patients and related history.
+
    The second command is equivalent to
    `uv run streamlit run src/mh_risk_outreach/ui/app.py`. The display reads from
    `patients.db`; if it is empty, the page explains how to populate it.
@@ -90,9 +94,9 @@
    from SQLite. **Reset** clears the page display only; it leaves those tables
    in the database.
 
-   If you reimport data to the same database path while Streamlit is running,
-   restart Streamlit, then retrain and rescore the models. Reimporting during an
-   active session is unsupported.
+   An import cannot replace or reset an existing dataset. Reimporting the same
+   data is safe and skips; the prototype has no dataset reset or replacement
+   workflow.
 
 7. Run the baseline test:
 

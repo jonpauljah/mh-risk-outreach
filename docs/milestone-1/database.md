@@ -38,11 +38,17 @@ SQLite files are generated locally and ignored by Git; `schema.sql` is tracked.
 
 ## Import lifecycle and consumer queries
 
-**Pending for Milestone 1:** record the database path, initialization behavior
-for existing databases, transaction boundaries, failed-write state, duplicate
-policy, and repeat-import behavior. Do not replace explicitly defined tables
-with pandas-inferred tables. Document how future schema changes require a
-rebuild or migration rather than silently using an incompatible database.
+The default database path is `config.DEFAULT_DB_PATH` (`patients.db`). The
+repository creates missing schema tables from tracked `schema.sql`. Patient
+imports run only when the `patients` table is empty; a populated table causes
+the pipeline to skip before reading the CSV. The repository repeats this guard
+under an immediate write transaction, and a failed initial insert rolls back
+all inserted rows. Imports never replace the patient table. Duplicate matching
+and handling are not implemented.
+
+**Pending:** document how future schema changes require a rebuild or migration
+rather than silently using an incompatible database. Do not replace explicitly
+defined tables with pandas-inferred tables.
 
 Provide example queries for record counts, displayed records, and features plus
 the target for later ML consumption. Identify excluded metadata and the target
