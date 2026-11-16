@@ -6,7 +6,7 @@ from mh_risk_outreach.model_inputs import MODEL_FEATURES, select_model_inputs
 
 
 def test_model_feature_policy() -> None:
-    """The documented 15 exclusions leave 35 unique source inputs."""
+    """The documented exclusions leave 33 unique source inputs."""
     excluded = {
         "Previously_Diagnosed",
         "Ever_Sought_Treatment",
@@ -25,8 +25,9 @@ def test_model_feature_policy() -> None:
         "Diet_Quality",
     }
 
-    assert len(MODEL_FEATURES) == len(set(MODEL_FEATURES)) == 35
-    assert set(MODEL_FEATURES) == set(FEATURES) - excluded
+    safety_flags = {"Self_Harm_Thoughts", "Suicidal_Thoughts"}
+    assert len(MODEL_FEATURES) == len(set(MODEL_FEATURES)) == 33
+    assert set(MODEL_FEATURES) == set(FEATURES) - excluded - safety_flags
     assert {TARGET, MEMBER_ID}.isdisjoint(MODEL_FEATURES)
 
 
@@ -54,6 +55,7 @@ def test_select_inputs_for_training_and_scoring(
     assert selected.index.tolist() == [7, 3]
     assert selected["Age"].tolist() == [25, 42]
     assert selected["Smoking"].tolist() == ["Never", "Former"]
+    assert {"Self_Harm_Thoughts", "Suicidal_Thoughts"}.isdisjoint(selected.columns)
     pd.testing.assert_frame_equal(source, original)
 
     selected.loc[7, "Age"] = 99
@@ -63,3 +65,14 @@ def test_select_inputs_for_training_and_scoring(
 def test_missing_model_input_raises(records: pd.DataFrame) -> None:
     with pytest.raises(KeyError, match="Age"):
         select_model_inputs(records.drop(columns="Age"))
+
+
+def test_safety_flags_are_not_required_for_training_or_inference(
+    records: pd.DataFrame,
+) -> None:
+    without_flags = records.drop(columns=["Self_Harm_Thoughts", "Suicidal_Thoughts"])
+
+    selected = select_model_inputs(without_flags)
+
+    assert tuple(selected.columns) == MODEL_FEATURES
+    assert len(selected.columns) == 33

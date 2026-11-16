@@ -73,7 +73,14 @@
 
    Omit `--model` to train the default (logistic regression). See the
    [ML spec](docs/ml-spec.md) for the model framework, the metric definitions,
-   and the measured results.
+   and the measured results. Models trained before issue #33 contain two safety
+   flags in their inputs. Retrain all three after updating the code: the scoring
+   loader rejects their old artifacts, and the risk page offers **Train** for
+   each outdated model. The current models use 33 source features and 42
+   prepared columns; the safety flags remain available for separate review.
+   The Model evaluation page compares all three on the held-out set and its
+   unflagged subset, including positive labels among the top 100 unflagged
+   members for each model.
 
 6. Score members and build the outreach worklist:
 

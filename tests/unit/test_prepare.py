@@ -46,18 +46,19 @@ def test_column_groups_cover_every_model_input_once() -> None:
 
     assert len(groups) == len(set(groups))
     assert set(groups) == set(MODEL_FEATURES)
-    assert PREPARED_COLUMN_COUNT == 44
+    assert PREPARED_COLUMN_COUNT == 42
 
 
-def test_real_dataset_prepares_to_44_numeric_columns(
+def test_real_dataset_prepares_to_42_numeric_columns(
     fitted, survey: pd.DataFrame
 ) -> None:
     prepared = fitted.transform(survey)
 
-    assert prepared.shape == (len(survey), 44)
+    assert prepared.shape == (len(survey), 42)
     assert prepared.notna().all().all()
     assert all(np.issubdtype(dtype, np.number) for dtype in prepared.dtypes)
     assert {TARGET, MEMBER_ID}.isdisjoint(prepared.columns)
+    assert {"Self_Harm_Thoughts", "Suicidal_Thoughts"}.isdisjoint(prepared.columns)
     assert prepared.index.equals(survey.index)
 
 
@@ -68,7 +69,7 @@ def test_output_columns_are_fixed_for_any_batch(fitted, survey: pd.DataFrame) ->
     for batch in (survey.iloc[[9000]], no_widowed):
         prepared = fitted.transform(batch)
         assert list(prepared.columns) == expected
-        assert prepared.shape[1] == 44
+        assert prepared.shape[1] == 42
 
     assert (fitted.transform(no_widowed)["Marital_Status_Widowed"] == 0).all()
 
@@ -170,7 +171,6 @@ def test_unknown_unordered_category_warns_and_encodes_as_zeros(
         ("Feeling_Sad_Down", 11, "above 10"),
         ("Panic_Attacks", 7, "above 4"),
         ("Sleep_Hours_Night", "eight", "not a number"),
-        ("Suicidal_Thoughts", 2, "not 0 or 1"),
         ("Income_Level", "Very High", "unknown category"),
     ],
 )
@@ -200,6 +200,19 @@ def test_every_invalid_value_is_reported(survey: pd.DataFrame) -> None:
 def test_missing_input_column_raises(survey: pd.DataFrame) -> None:
     with pytest.raises(KeyError, match="Age"):
         clean_inputs(survey.drop(columns="Age"))
+
+
+def test_prepared_features_ignore_safety_flags(fitted, survey: pd.DataFrame) -> None:
+    batch = survey.head(5).copy()
+    changed = batch.copy()
+    changed["Self_Harm_Thoughts"] = 1 - changed["Self_Harm_Thoughts"]
+    changed["Suicidal_Thoughts"] = 1 - changed["Suicidal_Thoughts"]
+
+    prepared = fitted.transform(batch)
+    changed_prepared = fitted.transform(changed)
+
+    assert {"Self_Harm_Thoughts", "Suicidal_Thoughts"}.isdisjoint(prepared.columns)
+    pd.testing.assert_frame_equal(prepared, changed_prepared)
 
 
 def test_saved_pipeline_scores_identically(fitted, survey: pd.DataFrame) -> None:

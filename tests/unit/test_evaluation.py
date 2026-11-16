@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from mh_risk_outreach.evaluation import evaluate_scores, majority_baseline
+from mh_risk_outreach.evaluation import (
+    evaluate_scores,
+    majority_baseline,
+    precision_at_k,
+)
 
 
 def test_majority_baseline_on_an_imbalanced_label() -> None:
@@ -46,3 +50,45 @@ def test_every_metric_is_present_and_in_range() -> None:
     for name, value in metrics.items():
         assert np.isfinite(value), name
         assert 0.0 <= value <= 1.0, name
+
+
+def test_precision_at_k_uses_member_id_to_break_score_ties() -> None:
+    result = precision_at_k(
+        y_true=[1, 0, 1, 0],
+        y_prob=[0.9, 0.8, 0.8, 0.8],
+        member_ids=[4, 3, 2, 1],
+        k=3,
+    )
+
+    # Within the tied 0.8 scores, IDs 1 and 2 rank before ID 3.
+    assert result == {"positive_count": 2, "precision_at_k": pytest.approx(2 / 3)}
+
+
+def test_precision_at_k_reports_count_for_imbalanced_cohort() -> None:
+    labels = [1] * 12 + [0] * 988
+    result = precision_at_k(
+        y_true=labels,
+        y_prob=[0.99] * 12 + [0.5] * 988,
+        member_ids=list(range(1, 1001)),
+    )
+
+    assert result["positive_count"] == 12
+    assert result["precision_at_k"] == pytest.approx(0.12)
+
+
+@pytest.mark.parametrize(
+    ("labels", "probabilities", "member_ids", "k"),
+    [
+        ([1], [0.5], [1], 0),
+        ([1], [0.5], [1], 2),
+        ([1, 0], [0.5], [1, 2], 1),
+        ([2], [0.5], [1], 1),
+        ([1], [float("nan")], [1], 1),
+        ([1, 0], [0.5, 0.5], [1, 1], 1),
+    ],
+)
+def test_precision_at_k_rejects_invalid_inputs(
+    labels, probabilities, member_ids, k
+) -> None:
+    with pytest.raises(ValueError):
+        precision_at_k(labels, probabilities, member_ids, k=k)

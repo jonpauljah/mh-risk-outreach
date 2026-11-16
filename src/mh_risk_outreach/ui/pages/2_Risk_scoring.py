@@ -14,7 +14,6 @@ for any model without a saved artifact.
 Streamlit lists this page automatically beside ``ui/app.py``.
 """
 
-import json
 import time
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from mh_risk_outreach.scoring import (
     BAND_LABELS,
     CRITICAL_REASON,
     DEFAULT_ARTIFACTS_DIR,
+    artifact_model_version,
     load_scoring_pipeline,
     score_members,
 )
@@ -55,12 +55,11 @@ def _load(db_path: str, table: str) -> pd.DataFrame:
 
 
 def _model_version(model_name: str, artifacts_dir: str) -> str | None:
-    """Return the saved model's version, or ``None`` if it has not been trained."""
-    folder = Path(artifacts_dir) / model_name
-    if not (folder / "model.joblib").exists():
+    """Return the version only when the artifact matches current model inputs."""
+    try:
+        return artifact_model_version(model_name, artifacts_dir)
+    except (TypeError, ValueError):
         return None
-    metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-    return str(metadata.get("model_version", model_name))
 
 
 def _model_status(
@@ -77,7 +76,8 @@ def _model_status(
                 st.caption(f"Model version `{version}`")
                 continue
             all_ready = False
-            st.markdown("⚠️ Not trained yet")
+            stale = (Path(artifacts_dir) / name / "model.joblib").exists()
+            st.markdown("⚠️ Needs retraining" if stale else "⚠️ Not trained yet")
             if not locked and st.button("Train", key=f"train_{name}"):
                 with st.spinner(f"Training {name}..."):
                     model_training.run(

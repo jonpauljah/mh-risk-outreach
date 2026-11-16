@@ -40,7 +40,9 @@ from mh_risk_outreach.config import (
 from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.scores import save_member_scores
+from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
+from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
 from mh_risk_outreach.reasons import build_reasons
 
 DEFAULT_ARTIFACTS_DIR = "artifacts"
@@ -58,24 +60,56 @@ CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
 CRITICAL_REASON = "critical indicator (self-harm / suicidal thoughts), safety override"
 
 
-def load_scoring_pipeline(
+def artifact_model_version(
     model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
-) -> tuple[Pipeline, str]:
-    """Load a saved model pipeline and its ``model_version`` from the artifact.
+) -> str | None:
+    """Read a saved version only when its feature contract matches this code.
 
-    Reloading (rather than re-fitting) means every stored score traces back to a
-    saved model version. Missing artifacts stop the run with how to create them.
+    Return ``None`` when no model has been saved. A model trained with an older
+    feature set must be retrained before scoring; loading its pickle could
+    otherwise produce an incorrect score or a preparation error.
     """
     folder = Path(artifacts_dir) / model_name
     model_path = folder / "model.joblib"
     if not model_path.exists():
+        return None
+    try:
+        metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid metadata for {model_name}: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise TypeError(f"invalid metadata for {model_name}: expected an object")
+    if (
+        metadata.get("model_name") != model_name
+        or metadata.get("model_features") != list(MODEL_FEATURES)
+        or metadata.get("prepared_column_count") != PREPARED_COLUMN_COUNT
+        or not metadata.get("model_version")
+    ):
+        raise ValueError(
+            f"saved {model_name} artifact uses an outdated feature contract"
+        )
+    return str(metadata["model_version"])
+
+
+def load_scoring_pipeline(
+    model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
+) -> tuple[Pipeline, str]:
+    """Load a saved model and version after checking its feature contract."""
+    folder = Path(artifacts_dir) / model_name
+    try:
+        version = artifact_model_version(model_name, artifacts_dir)
+    except (TypeError, ValueError) as exc:
         raise SystemExit(
-            f"no saved model at {model_path}; train it first with "
+            f"{exc}; retrain with "
+            f"`uv run python -m mh_risk_outreach.models.train --model {model_name}`"
+        ) from exc
+    if version is None:
+        raise SystemExit(
+            f"no saved model at {folder / 'model.joblib'}; train it first with "
             f"`uv run python -m mh_risk_outreach.models.train --model {model_name}`"
         )
-    pipeline = joblib.load(model_path)
-    metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-    return pipeline, str(metadata.get("model_version", model_name))
+    pipeline = joblib.load(folder / "model.joblib")
+    return pipeline, version
 
 
 def assign_bands(scores: np.ndarray) -> np.ndarray:

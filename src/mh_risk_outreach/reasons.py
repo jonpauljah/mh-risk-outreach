@@ -60,8 +60,6 @@ NUMERIC_LABELS: dict[str, str] = {
 
 # 0/1 flags: named when present (value 1), as "no ..." when absent.
 BINARY_LABELS: dict[str, str] = {
-    "Self_Harm_Thoughts": "self-harm thoughts",
-    "Suicidal_Thoughts": "suicidal thoughts",
     "Trauma_History": "trauma history",
     "Family_History_Mental_Illness": "family history of mental illness",
     "Ever_Bullied_At_Work": "workplace bullying",
@@ -78,7 +76,7 @@ _NO_DRIVERS = "no strong risk factors identified"
 
 
 def _prepared_frame(pipeline: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
-    """Run member rows through the pipeline's preparation step to the 44 columns."""
+    """Run member rows through preparation to the 42 model columns."""
     return pipeline.named_steps["prepare"].transform(records)
 
 
@@ -90,7 +88,7 @@ def shap_contributions(
     chunk_size: int | None = None,
     progress: Callable[[float], None] | None = None,
 ) -> np.ndarray:
-    """Return signed contributions toward the positive class, shape (n_rows, 44).
+    """Return signed contributions toward the positive class, shape (n_rows, 42).
 
     A positive value means the column pushed that member's risk score up. The
     explainer is chosen from the model: ``LinearExplainer`` for a linear model
