@@ -1,0 +1,93 @@
+# Milestone 3 — Project Plan and Implementation Overview
+
+## Milestone Overview
+
+This proof of concept uses a synthetic mental health survey to support human
+outreach decisions. The existing Python application imports member records into
+SQLite and provides Streamlit views for records, model evaluation, and risk
+scoring. See the [dataset](../milestone-1/dataset.md), [ML specification](../ml-spec.md),
+and [current risk-scoring design](../risk-scoring.md) for the baseline.
+
+Milestone 3 aims to turn predictions into a manageable outreach workflow:
+preserve assessment history, recommend actions, let a manager select and track
+cases, and report outcomes. The [architecture and workflows](architecture-and-workflows.md)
+describe the intended data flow. Except where marked merged below, these are
+planned outcomes, not completed application behavior.
+
+## Objectives and Scope
+
+- Preserve the approved imported dataset and stable member identities.
+- Select one operational model using the three-model evaluation; assign stable,
+  model-derived risk bands and separate safety review from model predictions.
+- Keep on-demand assessment history and support explicit manual reassessment.
+- Generate explainable, versioned Next Best Action (NBA) recommendations.
+- Prioritize Safety Review and Standard Outreach within shared capacity, with
+  manager-selected case creation and an explicit safety exception.
+- Track cases from Pending through Accepted to Completed; retain decisions,
+  outcomes, timestamps, and historical context.
+- Provide Streamlit worklists, case management, reassessment, and read-only
+  reporting and member comparisons.
+
+## Implementation Progress
+
+Status below describes implementation, not merely GitHub issue state. Open PRs
+are proposals and are not merged. Dependencies are a logical implementation guide.
+
+| Issue | Objective | Main dependencies | Implementation status |
+| --- | --- | --- | --- |
+| [#31](https://github.com/jonpauljah/mh-risk-outreach/issues/31) | Protect initial import and member identity | Existing ETL | **Merged:** [PR #44](https://github.com/jonpauljah/mh-risk-outreach/pull/44) skips reimports into populated `patients`. |
+| [#32](https://github.com/jonpauljah/mh-risk-outreach/issues/32) | Assessment and case persistence | Coordinate #31 | **Open PR:** [#45](https://github.com/jonpauljah/mh-risk-outreach/pull/45) implements storage operations, not complete orchestration or UI. |
+| [#33](https://github.com/jonpauljah/mh-risk-outreach/issues/33) | Exclude safety flags and reevaluate three models | Existing ML pipeline | **Open PR:** [#46](https://github.com/jonpauljah/mh-risk-outreach/pull/46); model selection remains open. |
+| [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) | Operational model and stable bands | #33, #32 | Planned. |
+| [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) | Current and historical assessments | #32, #34; #36 contract | Planned integration; storage primitives in open #45. |
+| [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) | Deterministic NBA rules | #33, #34 | Planned. |
+| [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | Planned. |
+| [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38) | Case lifecycle | #32, #37; #35, #36 | Planned policy; storage primitives in open #45. |
+| [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) | Worklists and case creation UI | #37, #38 | Planned. |
+| [#40](https://github.com/jonpauljah/mh-risk-outreach/issues/40) | Active case management UI | #38, #39 | Planned. |
+| [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) | Manual reassessment and demo presets | #34–#38 | Planned; submission persistence in open #45. |
+| [#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42) | Read-only history and comparisons | #38, #39, #41 | Planned. |
+
+## Remaining Work and Implementation Order
+
+1. Complete the persistence and model-feature foundations (#32–#33). Select
+   an operational model and versioned band boundaries (#34); connect durable
+   assessments to scoring (#35) and implement NBA rules (#36).
+2. Build eligibility and capacity policy (#37), then enforce the case lifecycle
+   and transactional creation (#38). The manager-driven creation flow differs
+   from client contract wording and requires sponsor approval, as #37 notes.
+3. Integrate worklists (#39), case management (#40), and deliberate manual
+   reassessment (#41) in Streamlit. Add read-only reporting (#42) after case and
+   assessment histories are available. These groups may overlap where their
+   contracts are agreed; they do not imply assignments or dates.
+
+**Issue wording to update:** #41 asks for immediate recalculation and an atomic
+scored submission. Open #45 takes precedence: it saves a new current snapshot
+as `PendingScoring` and finalizes it separately after an explicit scoring run.
+#35's qualifying operational current-reference language also needs alignment
+with the pointer that advances at submission. The UI and eligibility policy must
+distinguish latest inputs from the latest available scored assessment; an old
+score must not be presented as a score for new inputs. See
+[scoring and assessment workflow](architecture-and-workflows.md#risk-scoring-and-assessment-workflow).
+
+## Milestone Deliverables
+
+- A working manager-driven outreach flow from population scoring and separate
+  safety review through recommendations, selected cases, outcomes, and history.
+- Tests for database relationships and rollback, stable scoring, deterministic
+  rules, eligibility and capacity, case transitions, and Streamlit workflows.
+- Demonstrations of first-case baseline creation, a safety exception at capacity,
+  an override and completed case, pending and subsequently scored reassessment,
+  and history with and without a later assessment.
+- Updated user guidance, verified results and limitations, and presentation
+  material explaining the decisions and demonstration.
+
+## Limitations and Scope Boundaries
+
+The 10,000-row synthetic dataset and this local proof of concept do not establish
+clinical validity or real-world performance. Outputs support human decisions;
+they are not diagnoses, clinical thresholds, or automated treatment. The scope
+does not add model families, automated treatment, or another database. Rule
+thresholds and workflow assumptions require sponsor/domain validation.
+
+Return to the [documentation index](../README.md).
