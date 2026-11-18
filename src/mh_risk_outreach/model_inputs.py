@@ -18,9 +18,6 @@ MODEL_FEATURES = (
     "Obsessive_Thoughts",
     "Compulsive_Behavior",
     "Panic_Attacks",
-    # Safety flags (2); also available separately for priority rules.
-    "Self_Harm_Thoughts",
-    "Suicidal_Thoughts",
     # History (2).
     "Trauma_History",
     "Family_History_Mental_Illness",
@@ -51,9 +48,10 @@ MODEL_FEATURES = (
 
 
 def select_model_inputs(records: pd.DataFrame) -> pd.DataFrame:
-    """Copy the 35 inputs in order, preserving values and the row index.
+    """Copy the 33 inputs in order, preserving values and the row index.
 
-    The target and member identifier are neither required nor included.
+    Safety flags, the target, and member identifier are neither required nor
+    included. Safety flags remain available to separate scoring priority rules.
     Missing input columns raise KeyError; extra columns are ignored.
     """
     return records.loc[:, list(MODEL_FEATURES)].copy()

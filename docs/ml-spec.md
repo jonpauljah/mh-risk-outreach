@@ -9,7 +9,9 @@ This doc covers how we use ML to identify members at risk, how we train the mode
 
 ## Summary
 
-We will use logistic regression as the first model for the MVP/POC. It is the simplest of the candidate algorithms and the easiest to explain: it learns one weight per column. Random Forest and XGBoost will be trained later on the same data for comparison.
+Logistic regression is the default model for the prototype. It is the simplest
+candidate and learns one weight per prepared column. Random Forest and XGBoost
+are also trained and evaluated on the same data for comparison.
 
 The training data is a Kaggle survey dataset of 10,000 rows. The column `Has_Mental_Health_Issue` (0 or 1) is the answer column the model learns to predict. The input columns are a mix of yes/no flags, number scales, and text categories.
 
@@ -19,9 +21,14 @@ records for outreach priority.
 
 We hold back 20% of the real rows as a test set. The model never sees these during training, so they give an honest check of its predictions. Synthetic data is used only to test that the code handles unusual inputs. It cannot measure prediction quality, because made-up rows have no true answer.
 
-Model quality is measured with recall, precision, PR-AUC, and calibration. PR-AUC is one number for the whole model that summarizes how well it ranks members. We use it to compare models and pick the best one.
+Model quality is measured with recall, precision, PR-AUC, calibration, and
+precision at the available outreach capacity. These measures compare candidates;
+the choice of an operational model is a separate decision.
 
-One known limitation: 92% of rows in the dataset are marked "yes". A model that always answers "yes" is therefore 92% accurate, so accuracy alone is not a meaningful result. Every metric is reported next to that baseline.
+One known limitation: 92% of rows in the dataset are marked "yes". A model that
+always answers "yes" is therefore 92% accurate, so accuracy alone is not a
+meaningful result. Ranking and accuracy are compared with prevalence or the
+always-positive baseline.
 
 Unit tests cover each function in the ML implementation, so that bugs in data preparation or scoring are caught before they affect the model.
 
@@ -53,7 +60,7 @@ each kept column is transformed before training.
 | Group | Columns | Decision |
 | --- | --- | --- |
 | Symptoms (13) | `Feeling_Sad_Down`, `Loss_Of_Interest`, `Sleep_Trouble`, `Fatigue`, `Poor_Appetite_Or_Overeating`, `Feeling_Worthless`, `Concentration_Difficulty`, `Anxious_Nervous`, `Mood_Swings`, `Irritability`, `Obsessive_Thoughts`, `Compulsive_Behavior`, `Panic_Attacks` | Keep |
-| Safety flags (2) | `Self_Harm_Thoughts`, `Suicidal_Thoughts` | Keep, and also use in the override rule |
+| Safety flags (2) | `Self_Harm_Thoughts`, `Suicidal_Thoughts` | Exclude from model inputs; retain in storage for separate human-led safety review and the scoring override |
 | History (2) | `Trauma_History`, `Family_History_Mental_Illness` | Keep |
 | Social (5) | `Social_Support`, `Feel_Understood`, `Loneliness`, `Close_Friends_Count`, `Discuss_Mental_Health` | Keep |
 | Stress and work (5) | `Financial_Stress`, `Work_Stress_Level`, `Job_Satisfaction`, `Work_Life_Balance`, `Ever_Bullied_At_Work` | Keep |
@@ -66,20 +73,21 @@ each kept column is transformed before training.
 
 | Type | Columns | Transformation |
 | --- | --- | --- |
-| Already 0/1 (5) | `Self_Harm_Thoughts`, `Suicidal_Thoughts`, `Trauma_History`, `Family_History_Mental_Illness`, `Ever_Bullied_At_Work` | None |
+| Already 0/1 (3) | `Trauma_History`, `Family_History_Mental_Illness`, `Ever_Bullied_At_Work` | None |
 | Number scales (23) | The 13 symptom columns, `Social_Support`, `Feel_Understood`, `Loneliness`, `Close_Friends_Count`, `Financial_Stress`, `Work_Stress_Level`, `Job_Satisfaction`, `Work_Life_Balance`, `Sleep_Hours_Night`, `Age` | Leave as numbers; put on a common scale with `StandardScaler` for logistic regression |
 | Ordered text (4) | `Income_Level`, `Exercise_Per_Week`, `Alcohol_Frequency`, `Discuss_Mental_Health` | Map to ordered numbers, e.g. Low 0, Middle 1, High 2 |
-| Unordered text (3) | `Employment_Status`, `Marital_Status`, `Smoking` | One yes/no column per category (turns 35 columns into 44) |
+| Unordered text (3) | `Employment_Status`, `Marital_Status`, `Smoking` | One yes/no column per category (turns 33 columns into 42) |
 
 
-Of the 51 columns, one is the answer column and 15 are dropped, leaving 35
-input columns. Splitting the three unordered text columns into yes/no
-columns turns those 35 into the 44 numeric columns the model trains on.
+Of the 51 source columns, one is the answer and 17 are excluded from the model,
+leaving 33 input columns. Splitting the three unordered text columns into
+yes/no columns turns those 33 into the 42 numeric columns the model trains on.
 
-We drop columns for one of three reasons: they describe a member who has
-already been identified (treatment status), they should not influence the
-score (gender and country, which we keep only to check fairness), or a care
-organization is unlikely to have them.
+We exclude treatment status because it describes someone already identified;
+gender and country to reserve them for fairness checks; and fields a care
+organization is unlikely to hold. Safety flags are excluded because they
+trigger separate human-led review and a scoring override, independent of model
+probabilities.
 
 The transformations put every column into a form the model can use:
 
@@ -90,10 +98,10 @@ The transformations put every column into a form the model can use:
 
 ### Model input selection (issue #13)
 
-`mh_risk_outreach.model_inputs.MODEL_FEATURES` defines the 35 selected source
+`mh_risk_outreach.model_inputs.MODEL_FEATURES` defines the 33 selected source
 columns in a fixed order. `select_model_inputs(records)` returns a copy of
 those columns, preserving values and the row index. It excludes `Member_ID`,
-`Has_Mental_Health_Issue`, and the 15 source features marked for exclusion above.
+`Has_Mental_Health_Issue`, and the 17 source features marked for exclusion above.
 The full survey remains stored by the ETL.
 
 Training code keeps the inputs (`X`) and target (`y`) separate:
@@ -113,11 +121,11 @@ a model. Those steps remain future work, outside issue #13.
 
 ### Model input preparation (issue #12)
 
-`mh_risk_outreach.prepare` turns the 35 selected inputs into the 44 numbers the
+`mh_risk_outreach.prepare` turns the 33 selected inputs into the 42 numbers the
 model reads. It has two parts:
 
 1. **`clean_inputs(records)`: fixed rules that learn nothing from the data.**
-   It selects the 35 inputs, trims text, matches categories regardless of
+   It selects the 33 inputs, trims text, matches categories regardless of
    letter case (`" yes EASILY "` becomes `"Yes easily"`), converts numbers,
    and turns blank cells (missing, empty, or only spaces) into gaps for step 2
    to fill. Values outside the documented ones stop the run with
@@ -129,7 +137,7 @@ model reads. It has two parts:
 Training code (issues #14 and #15) fits it, with the model appended, on the
 training split only, and saves the fitted result. Scoring loads that same
 object, so training and scoring always prepare rows identically and always get
-the same 44 columns in the same order.
+the same 42 columns in the same order.
 
 ```python
 from sklearn.linear_model import LogisticRegression
@@ -148,7 +156,7 @@ model.predict_proba(member_rows)[:, 1]  # scoring reuses them unchanged
 | Group | Valid values | Blank | Unknown or invalid value | Output |
 | --- | --- | --- | --- | --- |
 | Number scales (23) | 13 symptoms 0–10 (`Panic_Attacks` 0–4); `Social_Support`, `Feel_Understood`, `Loneliness`, `Financial_Stress`, `Work_Stress_Level`, `Job_Satisfaction`, `Work_Life_Balance` 1–10; `Close_Friends_Count` 0 or more; `Sleep_Hours_Night` 0–24; `Age` 18–120 | Training median | Reject the run | `StandardScaler` (training average and spread) |
-| Already 0/1 (5) | 0 or 1 | Most common training value | Reject the run | Unchanged |
+| Already 0/1 (3) | 0 or 1 | Most common training value | Reject the run | Unchanged |
 | Ordered text (4) | `Income_Level`: Low 0, Middle 1, High 2; `Exercise_Per_Week`: Never 0, 1-2 times 1, 3-4 times 2, 5+ times 3; `Alcohol_Frequency`: Never 0, Rarely 1, Weekly 2, Daily 3; `Discuss_Mental_Health`: Never 0, Rarely 1, Sometimes 2, Yes easily 3 | Most common training value | Reject the run (it has no place in the order) | The listed number |
 | Unordered text (3) | `Employment_Status`: Full-time, Part-time, Self-employed, Student, Unemployed; `Marital_Status`: Single, Married, Divorced, Widowed; `Smoking`: Never, Former, Current | Most common training value | Keep the row, warn, and set all of that column's 0/1 columns to 0 | One 0/1 column per listed category (12) |
 
@@ -223,7 +231,7 @@ live in `config.py`.
 **No leakage.** The split happens before anything is fitted. The preparation
 pipeline (`build_preparation_pipeline`) and the model are fitted on the training
 rows only (issue #15), so no value learned from the evaluation rows — a median,
-an average, a weight — reaches training. `split_xy(records)` separates the 35
+an average, a weight — reaches training. `split_xy(records)` separates the 33
 inputs (`X`) from the target (`y`) using the issue #13 selector, so the target
 is never fed in as a predictor.
 
@@ -320,7 +328,8 @@ plus reproducibility fields (`run_at`, `model_version`, `n_train`, `n_eval`,
 `random_state`). The fitted pipeline and a `metadata.json` are saved under
 `artifacts/<name>/` (git-ignored; reproducible from code and the fixed seed).
 
-**Measured results** (8,000 train / 2,000 eval, seed 42):
+**Historical results before issue #33** (8,000 train / 2,000 eval, seed 42;
+the two safety flags were still model inputs):
 
 | Measure | Logistic regression | Random Forest | XGBoost | Majority baseline |
 | --- | --- | --- | --- | --- |
@@ -332,13 +341,13 @@ plus reproducibility fields (`run_at`, `model_version`, `n_train`, `n_eval`,
 | Accuracy @0.5 | 0.921 | 0.921 | 0.841 | 0.921 |
 | Brier (calibration) | **0.070** | 0.077 | 0.126 | — |
 
-**Logistic regression does best on every ranking and calibration measure**, so
+**In that historical run, logistic regression did best on ranking and calibration measures**, so
 the added complexity of Random Forest and XGBoost buys nothing on this data.
 Weighting logistic regression with `class_weight="balanced"` was also tried: it
 leaves the ranking unchanged (PR-AUC 0.946) but wrecks calibration (Brier 0.231),
 so the default unweighted model is kept.
 
-**Weaknesses found.** All three models clear the PR-AUC gate but only just
+**Historical weaknesses found.** All three models clear the PR-AUC gate but only just
 (0.936–0.947 vs 0.921), and ROC-AUC near 0.6 for three very different model
 families shows the limit is the signal in the data, not the algorithm —
 consistent with the dataset note that no single column predicts the label well.
@@ -349,8 +358,81 @@ a 0.5 cutoff. **Members must be prioritized by rank (top-K), per
 [Priority bands](#6-priority-bands)**, not a fixed threshold. No model is retired
 here: the comparison informs the downstream choice, which remains an explicit
 team decision. Logistic regression keeps the per-member "top reasons from signed
-weights" of [Interpreting Outputs](#interpreting-outputs); Random Forest and
-XGBoost expose only global feature importances.
+weights" of [Interpreting Outputs](#interpreting-outputs); the current scoring
+path also generates readable SHAP explanations for Random Forest and XGBoost.
+
+### Safety-flag-free model reevaluation (issue #33)
+
+The current model contract excludes `Self_Harm_Thoughts` and
+`Suicidal_Thoughts` from both 33 selected source inputs and 42 prepared numeric
+columns. The fields remain unchanged in the source CSV and the `patients`
+table. Scoring reads them separately for its safety override; they have no
+model SHAP contributions. An existing artifact whose metadata still names
+either flag is rejected with a retraining message before it can score.
+
+These results use the source CSV with SHA-256
+`5890f6d073b9313d20ef0b43c231085462bb565dfa44f6307bb549eeb5fcd0ed`.
+All three models use the unchanged label, source rows, estimators, seed 42, and
+stratified split: 8,000 training rows and the same 2,000 held-out rows (1,843
+positive, 157 negative). The *unflagged* cohort is the 1,658 held-out rows
+where both safety flags are 0 (1,521 positive, 137 negative). It is a subset
+of the holdout, not a second training set; models were not fitted or tuned on it.
+The newly saved local artifact versions are
+`logistic_regression_20261116T211231Z`,
+`random_forest_20261116T211251Z`, and `xgboost_20261116T211307Z`.
+
+| Held-out cohort and measure | Logistic regression | Random Forest | XGBoost | Baseline |
+| --- | ---: | ---: | ---: | ---: |
+| Full: PR-AUC | 0.947 | 0.945 | 0.936 | 0.922 |
+| Full: ROC-AUC | 0.638 | 0.638 | 0.612 | 0.500 |
+| Full: Brier (lower is better) | 0.071 | 0.078 | 0.125 | 0.072¹ |
+| Full: accuracy at 0.5 | 0.922 | 0.922 | 0.843 | 0.922 |
+| Unflagged: PR-AUC | 0.945 | 0.946 | 0.936 | 0.917 |
+| Unflagged: ROC-AUC | 0.649 | 0.648 | 0.624 | 0.500 |
+| Unflagged: Brier (lower is better) | 0.074 | 0.080 | 0.125 | 0.076¹ |
+| Unflagged: accuracy at 0.5 | 0.917 | 0.917 | 0.843 | 0.917 |
+
+¹ The Brier baseline here is a constant probability equal to the cohort's
+positive prevalence (computed as prevalence × (1 − prevalence)); it is shown
+for calibration context, unlike the historical table above.
+
+| Unflagged holdout at 0.5 and outreach capacity | Logistic regression | Random Forest | XGBoost | Always-positive baseline |
+| --- | ---: | ---: | ---: | ---: |
+| Positive-label recall | 1.000 | 1.000 | 0.892 | 1.000 |
+| Positive-label precision | 0.917 | 0.917 | 0.935 | 0.917 |
+| Negative-label recall | 0.000 | 0.000 | 0.307 | 0.000 |
+| Positive labels among first 100 unflagged members | **95 / 100** | **96 / 100** | **93 / 100** | 91.7 expected² |
+| Precision@100 | **0.950** | **0.960** | **0.930** | 0.917 prevalence² |
+
+² The baseline has no ranking among members: 91.7 is the expected positive
+count for an arbitrary 100 contacts at the cohort's 91.7% prevalence, not a
+measured top-100 list. Each model sorts by decreasing probability and uses
+ascending `Member_ID` to break score ties. The same 100-member capacity is
+applied separately to each model's unflagged holdout ranking.
+
+The answer is already positive for 91.7% of unflagged members, so accuracy or
+even 93–96 positives among 100 contacts cannot establish clinical usefulness.
+Random Forest finds one more positive than logistic regression in this sample,
+while logistic regression has lower Brier error. No operational model is
+selected here. The holdout contains only 137 unflagged negatives; these
+differences may be noisy. Brier is a summary error, not proof of calibration
+at each score level. The source label's meaning is not clinically validated,
+and these scores are outreach decision support, not a diagnosis or automated
+clinical decision. Safety flags still require independent human review.
+
+To reproduce in a fresh checkout, import the unchanged CSV and retrain each
+model with the same default database and artifacts directory:
+
+```bash
+uv run python -m mh_risk_outreach.etl.pipeline
+uv run python -m mh_risk_outreach.models.train --model logistic_regression
+uv run python -m mh_risk_outreach.models.train --model random_forest
+uv run python -m mh_risk_outreach.models.train --model xgboost
+```
+
+The Model evaluation page shows full and unflagged comparisons, including
+precision@100. Local artifacts and SQLite result rows are ignored by Git. The
+page fits models in memory on the same split; scoring loads the saved artifacts.
 
 ## Training
 
@@ -386,7 +468,7 @@ def prepare(df):
     df = df[KEEP_COLUMNS]
     df = map_ordered_text(df)      # Income_Level: Low 0, Middle 1, High 2
     df = one_hot(df, ["Employment_Status", "Marital_Status", "Smoking"])
-    return df                      # always 44 numeric columns, same order
+    return df                      # always 42 numeric columns, same order
 
 def train(df):
     X, y = prepare(df), df["Has_Mental_Health_Issue"]
@@ -443,7 +525,7 @@ the pipeline.
 #### 3. Training and scoring must prepare data identically
 
 The model does not know column names. It only sees positions: the 1st
-number, the 2nd, and so on up to the 44th. Training teaches it what each
+number, the 2nd, and so on up to the 42nd. Training teaches it what each
 position means.
 
 Two things can break this:
@@ -453,11 +535,11 @@ Two things can break this:
   does not crash. It silently returns wrong scores.
 - **Missing categories.** `Marital_Status` becomes four yes/no columns:
   Single, Married, Divorced, Widowed. If a later batch has no widowed
-  members, a naive conversion makes three columns, and the model gets 43
-  numbers when it expects 44.
+  members, a naive conversion makes three columns, and the model gets 41
+  numbers when it expects 42.
 
 **Requirement:** one `prepare()` function is used for both training and
-scoring. It always outputs the same 44 columns in the same order.
+scoring. It always outputs the same 42 columns in the same order.
 
 #### 4. Blank or unexpected values
 
@@ -551,7 +633,7 @@ in seconds.
 
 **Data preparation**
 
-- Output always has the same 44 columns in the same order, even for one row.
+- Output always has the same 42 columns in the same order, even for one row.
 - Each text mapping gives the expected number (`"Low"` becomes 0).
 - Dropped columns and the answer column never appear in the output.
 - A blank or unknown value triggers the behavior we chose, not a crash.

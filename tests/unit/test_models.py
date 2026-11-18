@@ -1,4 +1,3 @@
-import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,12 +11,15 @@ from mh_risk_outreach.db.results import (
     save_model_results,
 )
 from mh_risk_outreach.evaluation import majority_baseline
+from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.base import RiskModel
 from mh_risk_outreach.models.logistic_regression import LogisticRegressionRiskModel
 from mh_risk_outreach.models.random_forest import RandomForestRiskModel
 from mh_risk_outreach.models.train import save_artifact, train_and_evaluate
 from mh_risk_outreach.models.xgboost_model import XGBoostRiskModel
+from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
+from mh_risk_outreach.scoring import load_scoring_pipeline
 
 
 @pytest.fixture(scope="module")
@@ -94,13 +96,18 @@ def test_random_forest_beats_the_majority_baseline(records, rf_result) -> None:
     assert rf_result.results_row["pr_auc"] >= baseline["pr_auc"]
 
 
-def test_saved_and_reloaded_model_scores_identically(records, rf_result, tmp_path) -> None:
-    out = save_artifact(rf_result, "random_forest", artifacts_dir=str(tmp_path))
-    reloaded = joblib.load(out / "model.joblib")
+def test_saved_and_reloaded_model_scores_identically(
+    records, rf_result, tmp_path
+) -> None:
+    save_artifact(rf_result, "random_forest", artifacts_dir=str(tmp_path))
+    reloaded, version = load_scoring_pipeline("random_forest", str(tmp_path))
 
     before = rf_result.pipeline.predict_proba(records)[:, 1]
     after = reloaded.predict_proba(records)[:, 1]
     assert np.allclose(before, after)
+    assert version == rf_result.metadata["model_version"]
+    assert rf_result.metadata["model_features"] == list(MODEL_FEATURES)
+    assert rf_result.metadata["prepared_column_count"] == PREPARED_COLUMN_COUNT
 
 
 def test_results_row_round_trips_through_its_table(rf_result, tmp_path) -> None:

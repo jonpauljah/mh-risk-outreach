@@ -58,8 +58,8 @@ can later score *all* eligible members or a fresh batch without change.
 | `random_forest` | `shap.TreeExplainer` | — |
 | `xgboost` | `shap.TreeExplainer` | — |
 
-SHAP returns a signed contribution per **prepared** column (44 of them) for each
-member. To turn those into a reason we:
+SHAP returns a signed contribution per **prepared** model column (42 of them)
+for each member. To turn those into a reason we:
 
 1. take the contributions that pushed the score **up** (most positive),
 2. map each prepared column back to its source feature and a human phrase
@@ -70,6 +70,11 @@ member. To turn those into a reason we:
 A small phrase table (feature → how to describe a high / low / set value) lives
 with the scoring code. This is the bulk of the new work and the part the issue
 calls "turn those contributions into reasons the team can understand."
+Since issue #33, self-harm and suicidal-thought flags have no model contribution
+or SHAP phrase. The separate safety override still prepends its explicit
+"critical indicator" text and moves a flagged member to the top without
+changing the model probability. This prefix is an override explanation, not a
+model-derived reason.
 
 ### D3 — Risk levels via K-means on the scores (5 bands)
 

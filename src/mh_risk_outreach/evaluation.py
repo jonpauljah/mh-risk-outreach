@@ -87,6 +87,53 @@ def majority_baseline(
     }
 
 
+def precision_at_k(
+    y_true: Sequence[int] | pd.Series | np.ndarray,
+    y_prob: Sequence[float] | pd.Series | np.ndarray,
+    member_ids: Sequence[object] | pd.Series | np.ndarray,
+    *,
+    k: int = 100,
+) -> dict[str, float | int]:
+    """Return positive count and precision among the top ``k`` scored members.
+
+    Ties are ranked by ascending ``Member_ID`` so repeated evaluations produce
+    the same outreach list. The cohort must contain at least ``k`` rows.
+    """
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k <= 0:
+        raise ValueError("k must be a positive integer")
+
+    labels = np.asarray(y_true)
+    probabilities = np.asarray(y_prob, dtype=float)
+    ids = np.asarray(member_ids)
+    if labels.ndim != 1 or probabilities.ndim != 1 or ids.ndim != 1:
+        raise ValueError(
+            "labels, probabilities, and member_ids must be one-dimensional"
+        )
+    if not (len(labels) == len(probabilities) == len(ids)):
+        raise ValueError(
+            "labels, probabilities, and member_ids must have equal lengths"
+        )
+    if len(labels) < k:
+        raise ValueError(f"at least k={k} rows are required; received {len(labels)}")
+    if not np.isin(labels, [0, 1]).all():
+        raise ValueError("labels must contain only 0 and 1")
+    if (
+        not np.isfinite(probabilities).all()
+        or ((probabilities < 0) | (probabilities > 1)).any()
+    ):
+        raise ValueError("probabilities must be finite values between 0 and 1")
+    if pd.isna(ids).any() or pd.Index(ids).has_duplicates:
+        raise ValueError("member_ids must be non-null and unique")
+
+    ranked = pd.DataFrame(
+        {"label": labels.astype(int), "probability": probabilities, "member_id": ids}
+    ).sort_values(
+        ["probability", "member_id"], ascending=[False, True], kind="mergesort"
+    )
+    positive_count = int(ranked.head(int(k))["label"].sum())
+    return {"positive_count": positive_count, "precision_at_k": positive_count / int(k)}
+
+
 def format_report(
     model_name: str,
     metrics: dict[str, float],

@@ -1,4 +1,4 @@
-"""Clean the 35 model inputs and turn them into the 44 numbers the model reads.
+"""Clean the 33 model inputs and turn them into the 42 numbers the model reads.
 
 Two steps, used together for training and for scoring:
 
@@ -9,9 +9,10 @@ Two steps, used together for training and for scoring:
   blanks, scales numbers, and encodes text. It learns fill values, averages,
   and spreads when fitted, so it must be fitted on the training rows only.
 
-``build_preparation_pipeline`` chains both. Training code fits it (or a
-pipeline that ends in the model) on the training split; scoring reuses the
-fitted object unchanged, so both always produce the same 44 columns in order.
+``build_preparation_pipeline`` chains both. Safety flags remain outside the
+model feature contract for separate scoring priority rules. Training code fits
+it (or a pipeline that ends in the model) on the training split; scoring reuses the
+fitted object unchanged, so both always produce the same 42 columns in order.
 Rules and their reasons are documented in docs/ml-spec.md.
 """
 
@@ -60,10 +61,8 @@ SCALED_RANGES: dict[str, tuple[float | None, float | None]] = {
     "Age": (18, 120),  # the model is for adult members
 }
 
-# ---- Already 0/1 (5): blank -> most common training value, no scaling ----
+# ---- Already 0/1 (3): blank -> most common training value, no scaling ----
 BINARY_COLUMNS = (
-    "Self_Harm_Thoughts",
-    "Suicidal_Thoughts",
     "Trauma_History",
     "Family_History_Mental_Illness",
     "Ever_Bullied_At_Work",
@@ -97,7 +96,7 @@ PREPARED_COLUMN_COUNT = (
     + len(BINARY_COLUMNS)
     + len(ORDINAL_CATEGORIES)
     + sum(len(categories) for categories in ONE_HOT_CATEGORIES.values())
-)  # 44
+)  # 42
 
 # Errors listed in the exception message; the full list stays on ``.problems``.
 _MAX_REPORTED_PROBLEMS = 10
@@ -170,7 +169,7 @@ def _clean_text(series: pd.Series, categories: tuple[str, ...]) -> pd.Series:
 
 
 def clean_inputs(records: pd.DataFrame) -> pd.DataFrame:
-    """Select the 35 model inputs and apply the fixed cleaning rules.
+    """Select the 33 model inputs and apply the fixed cleaning rules.
 
     * Blank cells (missing, empty, or only spaces) become NaN for the
       preprocessor to fill.
@@ -224,8 +223,8 @@ def clean_inputs(records: pd.DataFrame) -> pd.DataFrame:
 def build_preprocessor() -> ColumnTransformer:
     """Return the unfitted step that fills blanks, scales, and encodes.
 
-    Fit it on training rows only. Output is a DataFrame with 44 named columns in
-    a fixed order: 23 scaled numbers, 5 flags, 4 ordered text columns, then one
+    Fit it on training rows only. Output is a DataFrame with 42 named columns in
+    a fixed order: 23 scaled numbers, 3 flags, 4 ordered text columns, then one
     0/1 column per listed unordered category. Blanks are filled with the
     training median (numbers) or the most common training value (flags, text).
     """

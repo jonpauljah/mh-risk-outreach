@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import precision_recall_curve, roc_curve
 
-from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, TARGET
+from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID, TARGET
 from mh_risk_outreach.datasets import assert_disjoint, split_dataset
 from mh_risk_outreach.db.repository import database_status, load_from_db
 from mh_risk_outreach.db.results import load_model_results
@@ -23,6 +23,7 @@ from mh_risk_outreach.evaluation import (
     DECISION_THRESHOLD,
     evaluate_scores,
     majority_baseline,
+    precision_at_k,
 )
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.train import train_and_evaluate
@@ -109,6 +110,45 @@ def _metrics_table(scores: dict, threshold: float) -> pd.DataFrame:
             METRIC_LABELS["accuracy"]: baseline["accuracy"],
         }
     )
+    return pd.DataFrame(rows)
+
+
+def _unflagged_metrics_table(scores: dict, evaluation: pd.DataFrame) -> pd.DataFrame:
+    """Metrics for held-out rows with both safety flags clear, using same scores."""
+    cohort_mask = evaluation["Self_Harm_Thoughts"].eq(0) & evaluation[
+        "Suicidal_Thoughts"
+    ].eq(0)
+    rows = []
+    for name, (_, y_true, y_prob) in scores.items():
+        labels = np.asarray(y_true)[cohort_mask.to_numpy()]
+        probabilities = np.asarray(y_prob)[cohort_mask.to_numpy()]
+        ids = evaluation.loc[cohort_mask, MEMBER_ID].to_numpy()
+        metrics = evaluate_scores(labels, probabilities)
+        baseline = majority_baseline(labels)
+        top = (
+            precision_at_k(labels, probabilities, ids, k=100)
+            if len(labels) >= 100
+            else None
+        )
+        rows.append(
+            {
+                "Model": name,
+                "N": len(labels),
+                "Positive": int(labels.sum()),
+                "Negative": int(len(labels) - labels.sum()),
+                "Prevalence": baseline["positive_rate"],
+                "PR-AUC": metrics["pr_auc"],
+                "PR-AUC baseline": baseline["pr_auc"],
+                "ROC-AUC": metrics["roc_auc"],
+                "Brier": metrics["brier"],
+                "Recall @ 0.5": metrics["recall"],
+                "Precision @ 0.5": metrics["precision"],
+                "Negative recall @ 0.5": metrics["negative_recall"],
+                "Accuracy @ 0.5": metrics["accuracy"],
+                "Positive in top 100": top["positive_count"] if top else np.nan,
+                "Precision @ 100": top["precision_at_k"] if top else np.nan,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -205,6 +245,19 @@ def main() -> None:
     table = _metrics_table(scores, threshold)
     st.dataframe(
         table.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch"
+    )
+
+    st.subheader("Unflagged held-out cohort")
+    st.caption(
+        "Rows with both safety flags equal to 0, scored from the same held-out predictions. "
+        "PR-AUC baseline is the cohort's positive prevalence; threshold metrics use 0.5. "
+        "Precision@100 ranks descending probability, then ascending Member_ID for ties."
+    )
+    unflagged = _unflagged_metrics_table(scores, split.evaluation)
+    st.dataframe(
+        unflagged.style.format(precision=3, na_rep="—"),
+        hide_index=True,
+        width="stretch",
     )
 
     st.subheader("How well each model ranks members")

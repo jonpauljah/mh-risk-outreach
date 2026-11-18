@@ -69,7 +69,7 @@ def split_dataset(
 
 
 def split_xy(records: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    """Separate the 35 model inputs (``X``) from the target (``y``).
+    """Separate the 33 model inputs (``X``) from the target (``y``).
 
     ``X`` is ``select_model_inputs(records)`` (issue #13); ``y`` is a copy of the
     ``TARGET`` column with the same index. The target is never passed into input

@@ -7,6 +7,7 @@ valid scores, the critical-indicator override, monotonic reasons, reproducible
 bands, and a stable worklist order.
 """
 
+import json
 import sqlite3
 
 import numpy as np
@@ -26,8 +27,11 @@ from mh_risk_outreach.models.train import train_and_evaluate
 from mh_risk_outreach.scoring import (
     BAND_LABELS,
     CRITICAL_INDICATORS,
+    CRITICAL_REASON,
     TOP_BAND,
+    artifact_model_version,
     assign_bands,
+    load_scoring_pipeline,
     score_members,
 )
 
@@ -121,6 +125,55 @@ def test_a_low_scoring_critical_member_is_still_top_priority(
     assert flagged["band_level_priority"] == TOP_BAND
     assert flagged["rank_priority"] <= (result["band_level_priority"] == TOP_BAND).sum()
     assert "critical indicator" in flagged["reasoning"]
+
+
+@pytest.mark.parametrize("flag", CRITICAL_INDICATORS)
+def test_safety_flag_changes_override_without_changing_prediction_or_model_reason(
+    records, lr_pipeline, background, flag
+) -> None:
+    base = records.loc[
+        (records["Self_Harm_Thoughts"] == 0) & (records["Suicidal_Thoughts"] == 0)
+    ].iloc[0]
+    unflagged = base.copy()
+    flagged = base.copy()
+    flagged[flag] = 1
+    frame = pd.DataFrame([unflagged, flagged]).reset_index(drop=True)
+    frame[MEMBER_ID] = [100001, 100002]
+
+    scored = score_members(
+        frame, lr_pipeline, model_version="test_v1", background=background
+    ).set_index(MEMBER_ID)
+
+    assert scored.loc[100001, "risk_score"] == pytest.approx(
+        scored.loc[100002, "risk_score"]
+    )
+    assert scored.loc[100002, "rank_priority"] == 1
+    assert scored.loc[100002, "band_level_priority"] == TOP_BAND
+    assert scored.loc[100002, "reasoning"] == (
+        f"{CRITICAL_REASON}; {scored.loc[100001, 'reasoning']}"
+    )
+
+
+def test_old_artifact_requires_retraining_before_unpickling(tmp_path) -> None:
+    folder = tmp_path / "logistic_regression"
+    folder.mkdir()
+    (folder / "model.joblib").write_bytes(b"not a pickle")
+    (folder / "metadata.json").write_text(
+        json.dumps(
+            {
+                "model_name": "logistic_regression",
+                "model_version": "old_version",
+                "model_features": ["Self_Harm_Thoughts", "Suicidal_Thoughts"],
+                "prepared_column_count": 44,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="outdated feature contract"):
+        artifact_model_version("logistic_regression", str(tmp_path))
+    with pytest.raises(SystemExit, match="retrain"):
+        load_scoring_pipeline("logistic_regression", str(tmp_path))
 
 
 def test_maxed_symptoms_score_higher_than_zeroed(
