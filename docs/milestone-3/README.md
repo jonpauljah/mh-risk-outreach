@@ -28,6 +28,27 @@ planned outcomes, not completed application behavior.
 - Provide Streamlit worklists, case management, reassessment, and read-only
   reporting and member comparisons.
 
+## Case Manager User Stories
+
+These stories describe the planned outreach workflow and its intended value.
+
+- As a case manager, I want to run population scoring when I choose, so that I
+  can review an updated outreach worklist.
+- As a case manager, I want to see safety concerns separately from model risk
+  bands, including concerns in newly submitted inputs, so that I can review them
+  even when standard outreach capacity is full.
+- As a case manager, I want to see eligible members, available capacity, and an
+  explained Next Best Action, so that I can select which outreach cases to create.
+- As a case manager, I want to accept a recommendation or record a justified
+  alternative, so that my decision and the original recommendation are retained.
+- As a case manager, I want to record an outcome and manually complete an accepted
+  case, so that active work and completed history remain accurate.
+- As a case manager, I want to submit updated survey information without changing
+  the imported record, so that the member has a new assessment while prior
+  assessments and cases remain available. I can see when scoring is pending.
+- As a case manager, I want to review a member's assessments and completed cases,
+  so that I can compare available results without assuming outreach changed risk.
+
 ## Implementation Progress
 
 Status below describes implementation, not merely GitHub issue state. Open PRs
