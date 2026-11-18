@@ -1,24 +1,63 @@
 # Database architecture
 
-SQLite is the chosen database for Milestone 1. The milestone must define its
-schema in `src/mh_risk_outreach/db/schema.sql`, initialize a local database from
-that file, and populate it through Python ETL. The current SQL file contains
-comments only and the repository module is a placeholder; implementing both is
-part of Milestone 1.
+SQLite is the local database. `src/mh_risk_outreach/db/schema.sql` defines the
+imported survey table and the additive assessment and outreach history tables.
+The ETL imports source rows into `patients`; history is created only by the
+explicit assessment and case operations described below.
 
 ## Tables and fields
 
-**Pending for Milestone 1:** document the chosen tables and every stored column,
-including SQLite type, nullability, defaults, allowed values, and purpose.
-Complete the [source-field mapping](etl-rules.md#source-to-database-mapping)
-so the SQL definitions and transformed records agree. Store typed numeric and
-binary values, readable categories, and the source target label separately in
-purpose from predictors and metadata.
+Milestone 3 adds `risk_assessments`, `outreach_cases`, and
+`member_assessment_state` to the existing `patients` table. These tables are
+created additively by `init_schema()`; initialization and population scoring do
+not create assessment history. A baseline snapshot is created only as part of
+the first case transaction. Every explicit reassessment appends a distinct
+snapshot, even when no values changed. `inputs_json` contains exactly the 50
+survey feature fields (not `Member_ID` or the source target label). A member
+must already have assessment history to submit a reassessment; the first
+assessment is always created atomically with their first case.
 
-The dataset supplies survey rows without member identities. Define a prototype
-record primary key and source-row traceability without implying a verified
-patient identifier. Document uniqueness and any relationships between tables.
-Add a schema diagram if multiple tables or relationships need explanation.
+Assessment score fields are either all null with
+`scoring_status='PendingScoring'`, or supplied together with
+`scoring_status='Scored'`. The current pointer tracks the latest submitted
+assessment, including one still pending. Scoring finalization accepts
+caller-supplied score results and can change only that current pending row
+once; recommendation metadata can remain absent until its engine is available.
+`risk_score` is constrained to 0–100. No ML is invoked by the database layer.
+
+Assessment snapshots retain the operational model name and version,
+recommendation action and reason, and recommendation rule version when
+available. Cases copy the original recommended action, reason, and applicable
+versions. Selected and accepted actions, override justification, status,
+outcome, and acceptance, outcome, and completion timestamps are separate case
+fields. `update_case_decision()` stores these manager-supplied fields subject
+to schema value and timestamp constraints; it does not implement transition
+policy.
+
+Case creation reuses the current scored, unused assessment or creates the
+on-demand baseline inside the first-case transaction. For a reused assessment,
+the case action must match the stored recommendation action; a snapshot with no
+recommendation action cannot open a case. `member_assessment_state` records the
+current assessment ID and the UTC time its pointer was last advanced.
+
+Each case references the assessment and member that opened it. A unique index
+prevents an assessment from being used twice, and a partial unique index allows
+only one Pending or Accepted case per member. Completed cases retain their
+outcome and completion timestamp and do not require a reassessment. Reassessment
+does not update a case. The persistence API creates Pending cases and stores
+history; manager status transitions remain a later lifecycle responsibility.
+All new persistence connections enable SQLite foreign keys. SQLite checks JSON
+syntax; the assessment writer validates the 50 field names and value types.
+Member/current/case references are constrained by foreign keys.
+
+`CREATE TABLE IF NOT EXISTS` is additive, but does not migrate an incompatible
+preexisting definition of one of these new tables. A database with an
+incompatible schema requires a deliberate migration.
+
+`patients.Member_ID` identifies a prototype survey record, not a verified
+person. The 50 input field names and their types are defined in `config.py` and
+the SQL table; `Has_Mental_Health_Issue` is the separate source target, not an
+input feature.
 
 ## Creation and access
 
@@ -32,9 +71,11 @@ Add a schema diagram if multiple tables or relationships need explanation.
 5. Streamlit queries the stored data through repository functions. Later ML
    code can query typed features and the target from the same database.
 
-Keep connections, SQL, and record queries in `db/repository.py`. The UI must
-explain an absent or unpopulated database and direct users to run the import.
-SQLite files are generated locally and ignored by Git; `schema.sql` is tracked.
+The existing import and score repositories preserve their current behavior.
+The focused history access modules are `db/assessments.py` and
+`db/outreach.py`. Each connection opened by this persistence layer enables
+SQLite foreign-key enforcement. New database files are created locally and
+ignored by Git; `schema.sql` is tracked.
 
 ## Import lifecycle and consumer queries
 
@@ -46,9 +87,9 @@ under an immediate write transaction, and a failed initial insert rolls back
 all inserted rows. Imports never replace the patient table. Duplicate matching
 and handling are not implemented.
 
-**Pending:** document how future schema changes require a rebuild or migration
-rather than silently using an incompatible database. Do not replace explicitly
-defined tables with pandas-inferred tables.
+`CREATE TABLE IF NOT EXISTS` adds missing tables but does not migrate an
+incompatible preexisting definition. Such a database needs a deliberate
+migration; these operations do not silently replace user data.
 
 Provide example queries for record counts, displayed records, and features plus
 the target for later ML consumption. Identify excluded metadata and the target
