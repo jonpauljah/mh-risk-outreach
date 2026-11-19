@@ -1,10 +1,14 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
 from sklearn.linear_model import LogisticRegression
 
-from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID, TARGET
+from mh_risk_outreach.bands import BAND_LABELS, assign_bands, fit_cut_points
+from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID, RANDOM_STATE, TARGET
+from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.results import (
     RESULTS_COLUMNS,
     load_model_results,
@@ -12,7 +16,11 @@ from mh_risk_outreach.db.results import (
 )
 from mh_risk_outreach.evaluation import majority_baseline
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
-from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
+from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY, artifacts
+from mh_risk_outreach.models.artifacts import (
+    artifact_model_version,
+    load_scoring_artifact,
+)
 from mh_risk_outreach.models.base import RiskModel
 from mh_risk_outreach.models.logistic_regression import LogisticRegressionRiskModel
 from mh_risk_outreach.models.random_forest import RandomForestRiskModel
@@ -110,6 +118,98 @@ def test_saved_and_reloaded_model_scores_identically(
     assert rf_result.metadata["prepared_column_count"] == PREPARED_COLUMN_COUNT
 
 
+def test_frozen_cuts_are_midpoints_and_equality_enters_higher_band() -> None:
+    scores = np.array([0.1, 10.2, 50.3, 80.4, 99.5] * 2)
+    cuts = fit_cut_points(scores)
+    assert cuts == pytest.approx((5.15, 30.25, 65.35, 89.95))
+    assert assign_bands(np.array([0.0, *cuts, 100.0]), cuts).tolist() == [
+        *BAND_LABELS,
+        BAND_LABELS[-1],
+    ]
+    with pytest.raises(ValueError, match="at least five distinct"):
+        fit_cut_points(np.array([0.0, 5.0, 5.0, 100.0]))
+
+
+def test_saved_bands_are_learned_from_the_training_split(records, rf_result) -> None:
+    train = split_dataset(records).train
+    scores = rf_result.pipeline.predict_proba(train)[:, 1] * 100.0
+    assert rf_result.metadata["risk_bands"] == {
+        "labels": list(BAND_LABELS),
+        "cut_points": list(fit_cut_points(scores)),
+        "reference_scope": "train",
+        "reference_row_count": len(train),
+        "algorithm": "kmeans",
+        "random_state": RANDOM_STATE,
+        "n_init": 10,
+    }
+
+
+def test_retraining_keeps_the_older_version_addressable(records, tmp_path) -> None:
+    model = LogisticRegressionRiskModel()
+    first = train_and_evaluate(model, records)
+    second = train_and_evaluate(model, records.iloc[::2])
+    save_artifact(first, model.name, str(tmp_path))
+    latest_path = save_artifact(second, model.name, str(tmp_path))
+    older_version = str(first.metadata["model_version"])
+    latest = load_scoring_artifact(model.name, str(tmp_path))
+    older = load_scoring_artifact(model.name, str(tmp_path), version=older_version)
+
+    assert latest.model_version == latest_path.name == second.metadata["model_version"]
+    assert older.model_version == older_version != latest.model_version
+    assert older.cut_points == tuple(first.metadata["risk_bands"]["cut_points"])
+    assert latest.cut_points == tuple(second.metadata["risk_bands"]["cut_points"])
+    assert older.cut_points != latest.cut_points
+    assert np.allclose(
+        older.pipeline.predict_proba(records), first.pipeline.predict_proba(records)
+    )
+    with pytest.raises(OSError):
+        save_artifact(first, model.name, str(tmp_path))
+    assert artifact_model_version(model.name, str(tmp_path)) == latest.model_version
+
+
+def test_failed_save_does_not_advance_latest(
+    records, rf_result, tmp_path, monkeypatch
+) -> None:
+    model = RandomForestRiskModel()
+    out = save_artifact(rf_result, model.name, str(tmp_path))
+    second = train_and_evaluate(model, records)
+
+    def fail_dump(*args, **kwargs):
+        raise OSError("failed write")
+
+    monkeypatch.setattr(artifacts.joblib, "dump", fail_dump)
+    with pytest.raises(OSError, match="failed write"):
+        save_artifact(second, model.name, str(tmp_path))
+    assert list(out.parent.iterdir()) == [out]
+    assert artifact_model_version(model.name, str(tmp_path)) == out.name
+
+
+@pytest.mark.parametrize("cuts", [[10, 10, 20, 30], [10, 20, 30, 100], [10, 20, 30]])
+def test_loader_rejects_invalid_saved_cut_points(cuts, rf_result, tmp_path) -> None:
+    out = save_artifact(rf_result, "random_forest", str(tmp_path))
+    path = out / "metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata["risk_bands"]["cut_points"] = cuts
+    path.write_text(json.dumps(metadata))
+
+    with pytest.raises(SystemExit, match="cut points.*retrain"):
+        load_scoring_artifact("random_forest", str(tmp_path))
+
+
+def test_legacy_artifact_with_current_features_requires_retraining(
+    rf_result, tmp_path
+) -> None:
+    folder = tmp_path / "random_forest"
+    folder.mkdir()
+    (folder / "model.joblib").write_bytes(b"legacy")
+    metadata = dict(rf_result.metadata)
+    del metadata["risk_bands"]
+    (folder / "metadata.json").write_text(json.dumps(metadata))
+
+    with pytest.raises(SystemExit, match="predates frozen risk bands.*retrain"):
+        load_scoring_artifact("random_forest", str(tmp_path))
+
+
 def test_results_row_round_trips_through_its_table(rf_result, tmp_path) -> None:
     db = str(tmp_path / "results.db")
     save_model_results(rf_result.results_row, table="random_forest", db_path=db)
@@ -120,7 +220,9 @@ def test_results_row_round_trips_through_its_table(rf_result, tmp_path) -> None:
     assert stored.loc[0, "pr_auc"] == pytest.approx(rf_result.results_row["pr_auc"])
 
 
-def test_a_new_model_extends_the_framework_without_modifying_it(records, tmp_path) -> None:
+def test_a_new_model_extends_the_framework_without_modifying_it(
+    records, tmp_path
+) -> None:
     """Open/closed: a new RiskModel trains and writes to its own table, untouched base."""
 
     class DummyRiskModel(RiskModel):

@@ -12,15 +12,15 @@ Run it:
 """
 
 import argparse
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
+from uuid import uuid4
 
-import joblib
 import sklearn
 from sklearn.pipeline import Pipeline
 
+from mh_risk_outreach.bands import BAND_LABELS, BAND_N_INIT, fit_cut_points
 from mh_risk_outreach.config import (
     DEFAULT_DB_PATH,
     DEFAULT_TABLE,
@@ -38,10 +38,12 @@ from mh_risk_outreach.evaluation import (
 )
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
+from mh_risk_outreach.models.artifacts import (
+    DEFAULT_ARTIFACTS_DIR,
+    save_versioned_artifact,
+)
 from mh_risk_outreach.models.base import RiskModel
 from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
-
-DEFAULT_ARTIFACTS_DIR = "artifacts"
 
 
 class TrainingResult(NamedTuple):
@@ -62,23 +64,33 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
     split = split_dataset(records)
     pipeline = model.build_pipeline()
     pipeline.fit(split.train, split.train[TARGET])
+    cut_points = fit_cut_points(pipeline.predict_proba(split.train)[:, 1] * 100.0)
 
     y_true = split.evaluation[TARGET]
     y_prob = pipeline.predict_proba(split.evaluation)[:, 1]
     metrics = evaluate_scores(y_true, y_prob)
     baseline = majority_baseline(y_true)
 
-    run_at = datetime.now(UTC).isoformat(timespec="seconds")
-    version = f"{model.name}_{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    now = datetime.now(UTC)
+    run_at = now.isoformat(timespec="seconds")
+    version = f"{model.name}_{now:%Y%m%dT%H%M%SZ}_{uuid4().hex}"
     n_train, n_eval = len(split.train), len(split.evaluation)
 
     results_row: dict[str, object] = {
         "run_at": run_at,
         "model_version": version,
-        **{k: metrics[k] for k in (
-            "recall", "precision", "pr_auc", "roc_auc",
-            "accuracy", "negative_recall", "brier",
-        )},
+        **{
+            k: metrics[k]
+            for k in (
+                "recall",
+                "precision",
+                "pr_auc",
+                "roc_auc",
+                "accuracy",
+                "negative_recall",
+                "brier",
+            )
+        },
         "baseline_accuracy": baseline["accuracy"],
         "baseline_pr_auc": baseline["pr_auc"],
         "n_train": n_train,
@@ -94,6 +106,15 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
         "model_features": list(MODEL_FEATURES),
         "prepared_column_count": PREPARED_COLUMN_COUNT,
         "baseline_positive_rate": baseline["positive_rate"],
+        "risk_bands": {
+            "labels": list(BAND_LABELS),
+            "cut_points": list(cut_points),
+            "reference_scope": "train",
+            "reference_row_count": n_train,
+            "algorithm": "kmeans",
+            "random_state": RANDOM_STATE,
+            "n_init": BAND_N_INIT,
+        },
     }
     report = format_report(
         model.name, metrics, baseline, n_train=n_train, n_eval=n_eval
@@ -104,14 +125,10 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
 def save_artifact(
     result: TrainingResult, model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
 ) -> Path:
-    """Save the fitted pipeline and its metadata under ``<artifacts_dir>/<name>/``."""
-    out = Path(artifacts_dir) / model_name
-    out.mkdir(parents=True, exist_ok=True)
-    joblib.dump(result.pipeline, out / "model.joblib")
-    (out / "metadata.json").write_text(
-        json.dumps(result.metadata, indent=2), encoding="utf-8"
+    """Save the fitted pipeline, metadata, and frozen bands as one version."""
+    return save_versioned_artifact(
+        result.pipeline, result.metadata, model_name, artifacts_dir
     )
-    return out
 
 
 def run(
@@ -134,18 +151,25 @@ def run(
     out = save_artifact(result, model.name, artifacts_dir)
 
     print(result.report)
-    print(f"\nSaved model to {out}\nWrote results row to table {model.name!r} in {db_path}")
+    print(
+        f"\nSaved model to {out}\nWrote results row to table {model.name!r} in {db_path}"
+    )
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train and evaluate a risk model.")
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL, choices=sorted(REGISTRY), help="model to train"
+        "--model",
+        default=DEFAULT_MODEL,
+        choices=sorted(REGISTRY),
+        help="model to train",
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite path")
     parser.add_argument("--table", default=DEFAULT_TABLE, help="source records table")
-    parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS_DIR, help="artifacts dir")
+    parser.add_argument(
+        "--artifacts", default=DEFAULT_ARTIFACTS_DIR, help="artifacts dir"
+    )
     args = parser.parse_args()
     run(args.model, db_path=args.db, table=args.table, artifacts_dir=args.artifacts)
 

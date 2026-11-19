@@ -16,7 +16,6 @@ from streamlit.testing.v1 import AppTest
 from mh_risk_outreach import config, scoring
 from mh_risk_outreach.db import scores as scores_db
 from mh_risk_outreach.etl.pipeline import run_etl
-from mh_risk_outreach.scoring import CRITICAL_REASON
 
 PAGE = str(
     Path(__file__).resolve().parents[2]
@@ -67,24 +66,23 @@ def test_train_run_and_reset(paths) -> None:
     assert [h.value for h in at.subheader] == ["logistic_regression"]
     table = at.dataframe[0].value
     assert len(table) == 2_000
-    assert list(table["Priority"]) == list(range(1, 2_001))
-    assert table["Safety flag"].iloc[0]  # the override puts flagged members first
+    assert list(table["Contact rank"]) == list(range(1, 2_001))
+    assert table["Safety review required"].iloc[0]  # safety reviews are ranked first
     assert not table["Reason"].str.startswith("critical indicator").any()
     stored = scores_db.load_member_scores("logistic_regression", db_path=db)
     stored = stored.sort_values("rank_priority").reset_index(drop=True)
     assert list(table["Member ID"]) == list(stored["Member_ID"])
-    assert list(table["Priority"]) == list(stored["rank_priority"])
+    assert list(table["Contact rank"]) == list(stored["rank_priority"])
     assert list(table["Risk score"]) == pytest.approx(list(stored["risk_score"]))
     assert list(table["Risk band"]) == list(stored["band_level_priority"])
     assert (
-        list(table["Safety flag"])
-        == stored["reasoning"].str.startswith(f"{CRITICAL_REASON}; ").tolist()
+        list(table["Safety review required"])
+        == stored["safety_review_required"].tolist()
     )
-    assert (
-        list(table["Reason"])
-        == stored["reasoning"].str.removeprefix(f"{CRITICAL_REASON}; ").tolist()
-    )
-    metadata = Path(artifacts) / "logistic_regression" / "metadata.json"
+    assert list(table["Reason"]) == stored["reasoning"].tolist()
+    folder = Path(artifacts) / "logistic_regression"
+    version = (folder / "latest").read_text().strip()
+    metadata = folder / "versions" / version / "metadata.json"
     model_version = json.loads(metadata.read_text())["model_version"]
     assert stored["model_version"].eq(model_version).all()
     assert f"Model version `{model_version}`" in " ".join(
@@ -129,3 +127,4 @@ def test_page_displays_reason_read_back_from_database(paths, monkeypatch) -> Non
     assert at.dataframe[0].value["Reason"].iloc[0] == "read back from SQLite"
     persisted = scores_db.load_member_scores("logistic_regression", db_path=db)
     assert persisted["reasoning"].iloc[0] == "read back from SQLite"
+    assert at.dataframe[0].value["Safety review required"].iloc[0]

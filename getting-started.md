@@ -62,8 +62,9 @@
 
    With the database populated (step 4), train a model. It fits on the training
    split, evaluates on the held-out split, prints a report comparing it to the
-   majority baseline, saves the fitted model under `artifacts/<name>/`, and
-   writes the metrics to a results table named after the model:
+   majority baseline, saves the fitted model under
+   `artifacts/<name>/versions/<version>/`, and writes the metrics to a results
+   table named after the model. The commands below train each model in turn.
 
    ```bash
    uv run python -m mh_risk_outreach.models.train --model logistic_regression
@@ -73,33 +74,43 @@
 
    Omit `--model` to train the default (logistic regression). See the
    [ML spec](docs/ml-spec.md) for the model framework, the metric definitions,
-   and the measured results. Models trained before issue #33 contain two safety
-   flags in their inputs. Retrain all three after updating the code: the scoring
-   loader rejects their old artifacts, and the risk page offers **Train** for
-   each outdated model. The current models use 33 source features and 42
-   prepared columns; the safety flags remain available for separate review.
+   and the measured results. Retrain each model you intend to score if its
+   saved artifact predates the versioned band metadata. The Risk scoring page
+   offers **Train** for outdated models. The current models use 33 source
+   features and 42 prepared columns, with safety flags reviewed separately.
    The Model evaluation page compares all three on the held-out set and its
    unflagged subset, including positive labels among the top 100 unflagged
    members for each model.
 
 6. Score members and build the outreach worklist:
 
-   With a model trained (step 5), score members and write the worklist to a
-   `<model>_scores` table. Each row gets a `risk_score`, a risk band
-   (`band_level_priority`), a strict `rank_priority`, and a short SHAP-based
-   `reasoning`, with self-harm / suicidal members forced to the top:
+   Use the trained operational model to score all imported members.
+
+   ```bash
+   uv run python -m mh_risk_outreach.scoring --operational
+   ```
+
+   This replaces the SQLite `operational_scores` worklist. Logistic regression
+   is the default. Set `MH_RISK_OUTREACH_OPERATIONAL_MODEL` before running
+   to select a different trained model, for example `random_forest`. Each row
+   includes the model version, score, model-derived band and SHAP explanation,
+   safety-review status, and contact rank. Members requiring safety review
+   come first, followed by descending scores and ascending IDs to resolve ties.
+
+   Use `--model` to score comparison models separately.
 
    ```bash
    uv run python -m mh_risk_outreach.scoring --model logistic_regression
    uv run python -m mh_risk_outreach.scoring --model all
    ```
 
-   By default this scores the held-out evaluation rows; add `--scope all` to
-   score every stored member. See [Risk scoring](docs/risk-scoring.md) for the
-   band, override, and reason rules. On the Risk scoring page, **Run** replaces
-   each selected model's held-out scores table and displays the rows read back
-   from SQLite. **Reset** clears the page display only; it leaves those tables
-   in the database.
+   These commands default to the held-out members and write the corresponding
+   `<model>_scores` tables. Add `--scope all` to compare over every stored
+   member. On the Risk scoring page, **Run** replaces the selected models'
+   held-out scores and displays the saved rows. Rerun scoring to refresh
+   comparison tables written by earlier versions. **Reset** clears the page
+   display and leaves the SQLite tables available. See
+   [Risk scoring](docs/risk-scoring.md).
 
    An import cannot replace or reset an existing dataset. Reimporting the same
    data is safe and skips; the prototype has no dataset reset or replacement
