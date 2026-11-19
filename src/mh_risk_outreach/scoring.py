@@ -20,7 +20,6 @@ from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.scores import save_member_scores
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
-from mh_risk_outreach.models import artifacts as model_artifacts
 from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
     load_scoring_artifact,
@@ -30,21 +29,8 @@ from mh_risk_outreach.reasons import build_reasons
 # Members explained per SHAP call when reporting progress.
 REASON_CHUNK_SIZE = 100
 CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
-
-
-def artifact_model_version(
-    model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
-) -> str | None:
-    """Return the latest version when its metadata supports scoring."""
-    return model_artifacts.artifact_model_version(model_name, artifacts_dir)
-
-
-def load_scoring_pipeline(
-    model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
-) -> tuple[Pipeline, str]:
-    """Load a saved pipeline and version for existing callers."""
-    artifact = load_scoring_artifact(model_name, artifacts_dir)
-    return artifact.pipeline, artifact.model_version
+# Batch and single-member predictions can differ by floating-point noise.
+RANK_SCORE_DECIMALS = 10
 
 
 def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
@@ -53,10 +39,15 @@ def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
 
 
 def rank_members(worklist: pd.DataFrame) -> pd.DataFrame:
-    """Rank safety reviews first, then raw scores descending and member IDs ascending."""
+    """Rank safety reviews first, then rounded scores descending and IDs ascending."""
     ranked = worklist.sort_values(
         by=["safety_review_required", "risk_score", MEMBER_ID],
         ascending=[False, False, True],
+        key=lambda column: (
+            column.astype("float64").round(RANK_SCORE_DECIMALS)
+            if column.name == "risk_score"
+            else column
+        ),
     ).reset_index(drop=True)
     ranked["rank_priority"] = np.arange(1, len(ranked) + 1)
     return ranked

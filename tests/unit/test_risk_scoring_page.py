@@ -13,9 +13,10 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from mh_risk_outreach import config, scoring
+from mh_risk_outreach import config
 from mh_risk_outreach.db import scores as scores_db
 from mh_risk_outreach.etl.pipeline import run_etl
+from mh_risk_outreach.models import artifacts as model_artifacts
 
 PAGE = str(
     Path(__file__).resolve().parents[2]
@@ -32,7 +33,7 @@ def paths(tmp_path, monkeypatch) -> tuple[str, str]:
     db = str(tmp_path / "patients.db")
     artifacts = str(tmp_path / "artifacts")
     monkeypatch.setattr(config, "DEFAULT_DB_PATH", db)
-    monkeypatch.setattr(scoring, "DEFAULT_ARTIFACTS_DIR", artifacts)
+    monkeypatch.setattr(model_artifacts, "DEFAULT_ARTIFACTS_DIR", artifacts)
     return db, artifacts
 
 

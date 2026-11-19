@@ -95,7 +95,8 @@
    to select a different trained model, for example `random_forest`. Each row
    includes the model version, score, model-derived band and SHAP explanation,
    safety-review status, and contact rank. Members requiring safety review
-   come first, followed by descending scores and ascending IDs to resolve ties.
+   come first, followed by descending scores compared at 10 decimal places
+   and ascending IDs to resolve ties.
 
    Use `--model` to score comparison models separately.
 

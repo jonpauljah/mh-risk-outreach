@@ -36,10 +36,15 @@ def _assessment_inputs(conn: sqlite3.Connection) -> list[AssessmentInputs]:
     return [AssessmentInputs(*row) for row in rows]
 
 
+def _published_cohort_id(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT cohort_id FROM operational_scores LIMIT 1").fetchone()
+    return str(row[0]) if row is not None else None
+
+
 def load_operational_inputs(
     db_path: str = DEFAULT_DB_PATH,
-) -> tuple[pd.DataFrame, list[AssessmentInputs]]:
-    """Read imported inputs and assessment provenance from one SQLite snapshot."""
+) -> tuple[pd.DataFrame, list[AssessmentInputs], str | None]:
+    """Read imported inputs, assessment provenance, and the current cohort together."""
     if not Path(db_path).is_file():
         raise ValueError(
             "import the patient dataset before running operational scoring"
@@ -48,16 +53,17 @@ def load_operational_inputs(
         init_schema(conn)
         conn.execute("BEGIN")
         patients = pd.read_sql_query("SELECT * FROM patients ORDER BY Member_ID", conn)
-        return patients, _assessment_inputs(conn)
+        return patients, _assessment_inputs(conn), _published_cohort_id(conn)
 
 
 def save_operational_scores(
     scores: pd.DataFrame,
     *,
     expected_inputs: list[AssessmentInputs],
+    expected_cohort_id: str | None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> None:
-    """Publish the full worklist together, provided its assessment inputs are current."""
+    """Publish the worklist if the assessments and published cohort are unchanged."""
     columns = (
         "Member_ID",
         "operational_model_name",
@@ -86,6 +92,10 @@ def save_operational_scores(
         if _assessment_inputs(conn) != expected_inputs:
             raise ValueError(
                 "assessment inputs changed during scoring; run scoring again"
+            )
+        if _published_cohort_id(conn) != expected_cohort_id:
+            raise ValueError(
+                "operational worklist changed during scoring; run scoring again"
             )
         conn.execute("DELETE FROM operational_scores")
         conn.executemany(statement, rows.itertuples(index=False, name=None))

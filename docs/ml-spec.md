@@ -592,7 +592,7 @@ number has no meaning; it only has to stay the same.
 #### 6. Priority bands
 
 With most source labels positive, model probabilities cluster toward the
-upper end of the scale. For each model version, training fits seeded
+upper end of the scale. When publishing a model version, training fits seeded
 one-dimensional K-means to the unrounded 0–100 scores from the training
 split. The four midpoints between the five ordered centers define Very Low,
 Low, Medium, High, and Very High. A score equal to a boundary enters the
@@ -615,7 +615,8 @@ The saved preprocessing and model pipeline returns a `risk_score` from
 0 to 100 for each member. The model score, band, and SHAP explanation use
 the trained model's inputs. Self-harm and suicidal-thought flags are
 reviewed separately. The worklist sorts by `safety_review_required` first,
-then descending unrounded model score, then ascending `Member_ID`.
+then descending model score rounded to 10 decimal places for rank comparisons,
+then ascending `Member_ID` for ties. The stored score keeps its original precision.
 `rank_priority` starts at 1 and gives the contact order for that cohort.
 
 Run `uv run python -m mh_risk_outreach.scoring --operational` to publish

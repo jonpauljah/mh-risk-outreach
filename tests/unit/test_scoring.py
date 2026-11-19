@@ -25,14 +25,16 @@ from mh_risk_outreach.db.scores import (
     save_member_scores,
     scores_status,
 )
-from mh_risk_outreach.models.artifacts import ScoringArtifact
+from mh_risk_outreach.models.artifacts import (
+    ScoringArtifact,
+    artifact_model_version,
+    load_scoring_artifact,
+)
 from mh_risk_outreach.models.logistic_regression import LogisticRegressionRiskModel
 from mh_risk_outreach.models.random_forest import RandomForestRiskModel
 from mh_risk_outreach.models.train import train_and_evaluate
 from mh_risk_outreach.scoring import (
     CRITICAL_INDICATORS,
-    artifact_model_version,
-    load_scoring_pipeline,
     rank_members,
     score_members,
 )
@@ -199,7 +201,7 @@ def test_old_artifact_requires_retraining_before_unpickling(tmp_path) -> None:
     with pytest.raises(ValueError, match="outdated feature contract"):
         artifact_model_version("logistic_regression", str(tmp_path))
     with pytest.raises(SystemExit, match="retrain"):
-        load_scoring_pipeline("logistic_regression", str(tmp_path))
+        load_scoring_artifact("logistic_regression", str(tmp_path))
 
 
 def test_maxed_symptoms_score_higher_than_zeroed(
@@ -370,19 +372,26 @@ def test_scores_status_reports_missing_then_present(worklist, tmp_path) -> None:
     assert scores_status("random_forest", db_path=db) == (False, 0)
 
 
-def test_rank_members_uses_raw_scores_and_member_id_for_ties() -> None:
+def test_rank_members_uses_rounded_scores_and_member_id_for_ties() -> None:
     worklist = pd.DataFrame(
         {
             MEMBER_ID: [4, 3, 2, 1, 5],
-            "risk_score": [85.00, 85.01, 85.01, 20.0, 19.0],
+            "risk_score": [85.0100000001, 85.010000000001, 85.01, 20.0, 19.0],
             "safety_review_required": [False, False, False, True, True],
             "reasoning": ["four", "three", "two", "one", "five"],
         }
     )
     ranked = rank_members(worklist)
-    assert ranked[MEMBER_ID].tolist() == [1, 5, 2, 3, 4]
+    assert ranked[MEMBER_ID].tolist() == [1, 5, 4, 2, 3]
     assert ranked["rank_priority"].tolist() == [1, 2, 3, 4, 5]
-    assert ranked["reasoning"].tolist() == ["one", "five", "two", "three", "four"]
+    assert ranked["risk_score"].tolist() == [
+        20.0,
+        19.0,
+        85.0100000001,
+        85.01,
+        85.010000000001,
+    ]
+    assert ranked["reasoning"].tolist() == ["one", "five", "four", "two", "three"]
 
 
 def test_populated_legacy_table_refreshes_atomically(worklist, tmp_path) -> None:

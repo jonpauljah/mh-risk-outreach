@@ -19,21 +19,23 @@ older tables.
 
 ## Saved bands and contact order
 
-For each version, training fits one seeded K-means with five centers on that
-model's unrounded 0–100 training scores. It sorts the centers and saves their
+When publishing a model version, training fits seeded K-means with five
+centers on its unrounded 0–100 training scores. It sorts the centers and saves their
 four adjacent midpoints alongside the ordered labels Very Low, Low, Medium,
 High, and Very High. The artifact's `metadata.json` records these cut points
 and their provenance under `risk_bands` in
 `artifacts/<model>/versions/<version>/`. Batch and individual scoring reuse
 the saved cut points from the same version used to calculate the score. A
 score exactly at a cut point belongs to the higher band. Retrain legacy
-artifacts that lack saved cut points.
+artifacts that lack saved cut points. The Model evaluation page can report
+metrics even when the predictions have too few distinct values for five bands.
 
 Either self-harm or suicidal-thought flags set `safety_review_required`. The
 score, band, and SHAP reason stay model-derived. Contact rank starts at 1
-and orders members requiring safety review first, then by descending
-unrounded score, then ascending `Member_ID`. The band describes the model
-score. The rank describes the contact order within a particular cohort.
+and orders members requiring safety review first, then by descending score
+rounded to 10 decimal places for comparison, then by ascending `Member_ID`.
+This comparison precision absorbs small numerical differences between batch
+and individual predictions. Stored scores keep their original precision.
 
 ## Assessment scoring and historical ranks
 
@@ -42,6 +44,8 @@ when available, otherwise their imported inputs. A pending reassessment
 supplies the latest safety flags. The worklist marks `inputs_pending_scoring`
 and records `score_assessment_id` and `safety_assessment_id` when those inputs
 come from history. Population scoring leaves assessment history unchanged.
+If another refresh publishes while scoring is in progress, the earlier run
+leaves that published worklist in place and asks for a rerun.
 
 `mh_risk_outreach.operational.score_operational_member` takes a member ID
 and the complete survey input snapshot. It evaluates those inputs with the

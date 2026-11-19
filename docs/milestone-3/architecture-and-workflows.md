@@ -55,8 +55,8 @@ flags from model predictors and reevaluated all three models.
    [Risk scoring](../risk-scoring.md) for configuration and ordering.
 2. Safety flags use the latest member inputs, including pending
    reassessments. A member can require safety review at any model band.
-   Flagged members rank first, followed by descending model score and
-   ascending member ID for ties.
+   Flagged members rank first, followed by descending model score compared at
+   10 decimal places and ascending member ID for ties.
 3. The current worklist uses imported inputs or the latest finalized
    assessment inputs. Running population scoring creates zero assessment
    rows. At first case creation, the persistence API can save a baseline and

@@ -188,3 +188,29 @@ def test_assessment_change_during_refresh_preserves_worklist(
     with pytest.raises(ValueError, match="assessment inputs changed during scoring"):
         refresh_operational_worklist(**paths)
     pd.testing.assert_frame_equal(load_operational_scores(db), original)
+
+
+@pytest.mark.parametrize("has_existing_worklist", [False, True])
+def test_overlapping_refresh_preserves_newer_worklist(
+    setup_scoring, monkeypatch, has_existing_worklist
+):
+    paths, _ = setup_scoring
+    db = paths["db_path"]
+    if has_existing_worklist:
+        refresh_operational_worklist(**paths)
+    save_scores = operational.save_operational_scores
+    newer = None
+
+    def save_after_newer_refresh(*args, **kwargs):
+        nonlocal newer
+        monkeypatch.setattr(operational, "save_operational_scores", save_scores)
+        refresh_operational_worklist(**paths)
+        newer = load_operational_scores(db)
+        save_scores(*args, **kwargs)
+
+    monkeypatch.setattr(
+        operational, "save_operational_scores", save_after_newer_refresh
+    )
+    with pytest.raises(ValueError, match="operational worklist changed during scoring"):
+        refresh_operational_worklist(**paths)
+    pd.testing.assert_frame_equal(load_operational_scores(db), newer)

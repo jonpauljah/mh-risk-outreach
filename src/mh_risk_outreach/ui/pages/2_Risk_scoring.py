@@ -26,12 +26,12 @@ from mh_risk_outreach.db import scores as scores_db
 from mh_risk_outreach.db.repository import database_status, load_from_db
 from mh_risk_outreach.models import REGISTRY
 from mh_risk_outreach.models import train as model_training
-from mh_risk_outreach.models.artifacts import load_scoring_artifact
-from mh_risk_outreach.scoring import (
+from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
     artifact_model_version,
-    score_members,
+    load_scoring_artifact,
 )
+from mh_risk_outreach.scoring import score_members
 
 IMPORT_COMMAND = "uv run python -m mh_risk_outreach.etl.pipeline"
 

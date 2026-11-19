@@ -26,10 +26,19 @@ from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
     load_scoring_artifact,
 )
-from mh_risk_outreach.scoring import CRITICAL_INDICATORS, rank_members, score_members
+from mh_risk_outreach.scoring import (
+    CRITICAL_INDICATORS,
+    RANK_SCORE_DECIMALS,
+    rank_members,
+    score_members,
+)
 
 OPERATIONAL_SCOPE = "all_imported_members"
-RANK_ORDER = ("safety_review_required desc", "risk_score desc", "Member_ID asc")
+RANK_ORDER = (
+    "safety_review_required desc",
+    f"risk_score rounded to {RANK_SCORE_DECIMALS} decimals desc",
+    "Member_ID asc",
+)
 
 
 def operational_model_name() -> str:
@@ -47,7 +56,7 @@ def refresh_operational_worklist(
     """Score all imported members and atomically replace the operational worklist."""
     model = operational_model_name()
     artifact = load_scoring_artifact(model, artifacts_dir)
-    patients, assessment_inputs = load_operational_inputs(db_path)
+    patients, assessment_inputs, cohort_id = load_operational_inputs(db_path)
     if patients.empty:
         raise ValueError(
             "import the patient dataset before running operational scoring"
@@ -99,7 +108,10 @@ def refresh_operational_worklist(
     if artifact_model_version(model, artifacts_dir) != artifact.model_version:
         raise ValueError("operational model changed during scoring; run scoring again")
     save_operational_scores(
-        worklist, expected_inputs=assessment_inputs, db_path=db_path
+        worklist,
+        expected_inputs=assessment_inputs,
+        expected_cohort_id=cohort_id,
+        db_path=db_path,
     )
     return worklist
 

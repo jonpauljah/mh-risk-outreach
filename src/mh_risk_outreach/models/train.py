@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
 
+import pandas as pd
 import sklearn
 from sklearn.pipeline import Pipeline
 
@@ -58,13 +59,12 @@ class TrainingResult(NamedTuple):
 def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
     """Split ``records``, fit on train only, score the held-out rows, measure.
 
-    Returns the fitted pipeline, the flat results-table row, the richer metadata
-    dict (saved beside the artifact), and a plain-language report.
+    Returns the fitted pipeline, the flat results-table row, run metadata,
+    and a plain-language report.
     """
     split = split_dataset(records)
     pipeline = model.build_pipeline()
     pipeline.fit(split.train, split.train[TARGET])
-    cut_points = fit_cut_points(pipeline.predict_proba(split.train)[:, 1] * 100.0)
 
     y_true = split.evaluation[TARGET]
     y_prob = pipeline.predict_proba(split.evaluation)[:, 1]
@@ -106,15 +106,6 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
         "model_features": list(MODEL_FEATURES),
         "prepared_column_count": PREPARED_COLUMN_COUNT,
         "baseline_positive_rate": baseline["positive_rate"],
-        "risk_bands": {
-            "labels": list(BAND_LABELS),
-            "cut_points": list(cut_points),
-            "reference_scope": "train",
-            "reference_row_count": n_train,
-            "algorithm": "kmeans",
-            "random_state": RANDOM_STATE,
-            "n_init": BAND_N_INIT,
-        },
     }
     report = format_report(
         model.name, metrics, baseline, n_train=n_train, n_eval=n_eval
@@ -123,12 +114,29 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
 
 
 def save_artifact(
-    result: TrainingResult, model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
+    result: TrainingResult,
+    model_name: str,
+    artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
+    *,
+    training_rows: pd.DataFrame,
 ) -> Path:
-    """Save the fitted pipeline, metadata, and frozen bands as one version."""
-    return save_versioned_artifact(
-        result.pipeline, result.metadata, model_name, artifacts_dir
+    """Learn bands from the model's training rows and save the complete bundle."""
+    cut_points = fit_cut_points(
+        result.pipeline.predict_proba(training_rows)[:, 1] * 100.0
     )
+    metadata = {
+        **result.metadata,
+        "risk_bands": {
+            "labels": list(BAND_LABELS),
+            "cut_points": list(cut_points),
+            "reference_scope": "train",
+            "reference_row_count": len(training_rows),
+            "algorithm": "kmeans",
+            "random_state": RANDOM_STATE,
+            "n_init": BAND_N_INIT,
+        },
+    }
+    return save_versioned_artifact(result.pipeline, metadata, model_name, artifacts_dir)
 
 
 def run(
@@ -147,8 +155,10 @@ def run(
 
     records = load_from_db(db_path, table)
     result = train_and_evaluate(model, records)
+    out = save_artifact(
+        result, model.name, artifacts_dir, training_rows=split_dataset(records).train
+    )
     save_model_results(result.results_row, table=model.name, db_path=db_path)
-    out = save_artifact(result, model.name, artifacts_dir)
 
     print(result.report)
     print(
