@@ -29,7 +29,7 @@ from mh_risk_outreach.config import (
     TARGET,
     TEST_SIZE,
 )
-from mh_risk_outreach.datasets import split_dataset
+from mh_risk_outreach.datasets import DatasetSplit, split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.results import save_model_results
 from mh_risk_outreach.evaluation import (
@@ -56,13 +56,12 @@ class TrainingResult(NamedTuple):
     report: str
 
 
-def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
-    """Split ``records``, fit on train only, score the held-out rows, measure.
+def train_and_evaluate(model: RiskModel, split: DatasetSplit) -> TrainingResult:
+    """Fit on the training split and measure performance on the held-out rows.
 
     Returns the fitted pipeline, the flat results-table row, run metadata,
     and a plain-language report.
     """
-    split = split_dataset(records)
     pipeline = model.build_pipeline()
     pipeline.fit(split.train, split.train[TARGET])
 
@@ -154,10 +153,9 @@ def run(
         raise SystemExit(f"unknown model {model_name!r}; choose from: {known}")
 
     records = load_from_db(db_path, table)
-    result = train_and_evaluate(model, records)
-    out = save_artifact(
-        result, model.name, artifacts_dir, training_rows=split_dataset(records).train
-    )
+    split = split_dataset(records)
+    result = train_and_evaluate(model, split)
+    out = save_artifact(result, model.name, artifacts_dir, training_rows=split.train)
     save_model_results(result.results_row, table=model.name, db_path=db_path)
 
     print(result.report)

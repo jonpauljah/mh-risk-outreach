@@ -9,6 +9,7 @@ from mh_risk_outreach.config import RANDOM_STATE
 
 BAND_LABELS = ("Very Low", "Low", "Medium", "High", "Very High")
 BAND_N_INIT = 10
+BAND_BOUNDARY_TOLERANCE = 1e-12
 
 
 def validate_cut_points(cut_points: object) -> tuple[float, ...]:
@@ -50,8 +51,11 @@ def fit_cut_points(scores: np.ndarray) -> tuple[float, ...]:
 
 
 def assign_bands(scores: np.ndarray, cut_points: object) -> np.ndarray:
-    """Assign saved bands, with exact cut-point equality in the higher band."""
+    """Assign saved bands, treating prediction noise below a cut as equality."""
     values = _validate_scores(scores)
-    return np.asarray(BAND_LABELS, dtype=object)[
-        np.searchsorted(validate_cut_points(cut_points), values, side="right")
-    ]
+    boundaries = np.array([*validate_cut_points(cut_points), np.inf])
+    indices = np.searchsorted(boundaries, values, side="left")
+    at_boundary = (values > 0.0) & (
+        boundaries[indices] - values < BAND_BOUNDARY_TOLERANCE
+    )
+    return np.asarray(BAND_LABELS, dtype=object)[indices + at_boundary]

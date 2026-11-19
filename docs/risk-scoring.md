@@ -20,13 +20,15 @@ older tables.
 ## Saved bands and contact order
 
 When publishing a model version, training fits seeded K-means with five
-centers on its unrounded 0–100 training scores. It sorts the centers and saves their
-four adjacent midpoints alongside the ordered labels Very Low, Low, Medium,
+centers on scores from the same rows used to fit the model. It saves the four
+adjacent midpoints alongside the ordered labels Very Low, Low, Medium,
 High, and Very High. The artifact's `metadata.json` records these cut points
 and their provenance under `risk_bands` in
 `artifacts/<model>/versions/<version>/`. Batch and individual scoring reuse
 the saved cut points from the same version used to calculate the score. A
-score exactly at a cut point belongs to the higher band. Retrain legacy
+score at a cut point belongs to the higher band. On the 0–100 scale, a
+positive score less than `1e-12` below a cut point is treated as equality
+to absorb prediction round-off. Retrain legacy
 artifacts that lack saved cut points. The Model evaluation page can report
 metrics even when the predictions have too few distinct values for five bands.
 

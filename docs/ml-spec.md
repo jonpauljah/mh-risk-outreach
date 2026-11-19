@@ -592,13 +592,13 @@ number has no meaning; it only has to stay the same.
 #### 6. Priority bands
 
 With most source labels positive, model probabilities cluster toward the
-upper end of the scale. When publishing a model version, training fits seeded
-one-dimensional K-means to the unrounded 0–100 scores from the training
-split. The four midpoints between the five ordered centers define Very Low,
-Low, Medium, High, and Very High. A score equal to a boundary enters the
-higher band. Batch and individual scoring use the same saved boundaries
-for that version, so changing the scored cohort leaves the member's band
-unchanged for the same inputs.
+upper end of the scale. Artifact publication fits seeded one-dimensional
+K-means to the unrounded 0–100 scores from the partition used to fit the
+model. The four midpoints between the five ordered centers define Very Low,
+Low, Medium, High, and Very High. Batch and individual scoring share the
+saved boundaries and the same comparison rule. A score at a boundary enters
+the higher band. Positive scores less than `1e-12` below a boundary also enter
+that band to account for floating-point round-off.
 
 #### 7. Versioning
 

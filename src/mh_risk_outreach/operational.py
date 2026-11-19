@@ -28,17 +28,12 @@ from mh_risk_outreach.models.artifacts import (
 )
 from mh_risk_outreach.scoring import (
     CRITICAL_INDICATORS,
-    RANK_SCORE_DECIMALS,
+    RANK_ORDER,
     rank_members,
     score_members,
 )
 
 OPERATIONAL_SCOPE = "all_imported_members"
-RANK_ORDER = (
-    "safety_review_required desc",
-    f"risk_score rounded to {RANK_SCORE_DECIMALS} decimals desc",
-    "Member_ID asc",
-)
 
 
 def operational_model_name() -> str:

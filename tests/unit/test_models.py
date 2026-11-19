@@ -1,4 +1,5 @@
 import json
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -8,7 +9,7 @@ from sklearn.linear_model import LogisticRegression
 
 from mh_risk_outreach.bands import BAND_LABELS, assign_bands, fit_cut_points
 from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID, RANDOM_STATE, TARGET
-from mh_risk_outreach.datasets import split_dataset
+from mh_risk_outreach.datasets import DatasetSplit, split_dataset
 from mh_risk_outreach.db.results import (
     RESULTS_COLUMNS,
     load_model_results,
@@ -16,7 +17,7 @@ from mh_risk_outreach.db.results import (
 )
 from mh_risk_outreach.evaluation import majority_baseline
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
-from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY, artifacts
+from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY, artifacts, train
 from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
     load_scoring_artifact,
@@ -43,8 +44,13 @@ def records() -> pd.DataFrame:
 
 
 @pytest.fixture(scope="module")
-def rf_result(records: pd.DataFrame):
-    return train_and_evaluate(RandomForestRiskModel(), records)
+def split(records: pd.DataFrame) -> DatasetSplit:
+    return split_dataset(records)
+
+
+@pytest.fixture(scope="module")
+def rf_result(split: DatasetSplit):
+    return train_and_evaluate(RandomForestRiskModel(), split)
 
 
 def test_all_models_are_registered() -> None:
@@ -58,9 +64,9 @@ def test_logistic_regression_is_the_default_model() -> None:
     assert DEFAULT_MODEL == "logistic_regression"
 
 
-def test_logistic_regression_trains_and_beats_the_baseline(records) -> None:
+def test_logistic_regression_trains_and_beats_the_baseline(records, split) -> None:
     """Logistic regression clears the PR-AUC gate with valid probabilities."""
-    result = train_and_evaluate(LogisticRegressionRiskModel(), records)
+    result = train_and_evaluate(LogisticRegressionRiskModel(), split)
 
     probs = result.pipeline.predict_proba(records)[:, 1]
     assert np.all((probs >= 0.0) & (probs <= 1.0))
@@ -68,17 +74,17 @@ def test_logistic_regression_trains_and_beats_the_baseline(records) -> None:
     assert result.results_row["pr_auc"] >= baseline["pr_auc"]
 
 
-def test_logistic_regression_has_one_weight_per_prepared_column(records) -> None:
+def test_logistic_regression_has_one_weight_per_prepared_column(split) -> None:
     """The per-member top reasons depend on one signed weight per column."""
-    result = train_and_evaluate(LogisticRegressionRiskModel(), records)
+    result = train_and_evaluate(LogisticRegressionRiskModel(), split)
 
     coefficients = result.pipeline.named_steps["model"].coef_
     assert coefficients.shape == (1, result.metadata["prepared_column_count"])
 
 
-def test_xgboost_trains_and_beats_the_baseline(records) -> None:
+def test_xgboost_trains_and_beats_the_baseline(records, split) -> None:
     """XGBoost drops into the same framework and clears the PR-AUC gate."""
-    result = train_and_evaluate(XGBoostRiskModel(), records)
+    result = train_and_evaluate(XGBoostRiskModel(), split)
 
     probs = result.pipeline.predict_proba(records)[:, 1]
     assert np.all((probs >= 0.0) & (probs <= 1.0))
@@ -104,13 +110,13 @@ def test_random_forest_beats_the_majority_baseline(records, rf_result) -> None:
 
 
 def test_saved_and_reloaded_model_scores_identically(
-    records, rf_result, tmp_path
+    records, split, rf_result, tmp_path
 ) -> None:
     save_artifact(
         rf_result,
         "random_forest",
         str(tmp_path),
-        training_rows=split_dataset(records).train,
+        training_rows=split.train,
     )
     reloaded = load_scoring_artifact("random_forest", str(tmp_path))
 
@@ -135,21 +141,42 @@ def test_frozen_cuts_are_midpoints_and_equality_enters_higher_band() -> None:
 
 
 def test_saved_bands_are_learned_from_the_training_split(
-    records, rf_result, tmp_path
+    split, rf_result, tmp_path
 ) -> None:
-    train = split_dataset(records).train
-    scores = rf_result.pipeline.predict_proba(train)[:, 1] * 100.0
-    out = save_artifact(rf_result, "random_forest", str(tmp_path), training_rows=train)
+    scores = rf_result.pipeline.predict_proba(split.train)[:, 1] * 100.0
+    out = save_artifact(
+        rf_result, "random_forest", str(tmp_path), training_rows=split.train
+    )
+    loaded = load_scoring_artifact("random_forest", str(tmp_path))
     metadata = json.loads((out / "metadata.json").read_text())
+    assert loaded.cut_points == pytest.approx(fit_cut_points(scores), abs=1e-10, rel=0)
     assert metadata["risk_bands"] == {
         "labels": list(BAND_LABELS),
-        "cut_points": list(fit_cut_points(scores)),
+        "cut_points": list(loaded.cut_points),
         "reference_scope": "train",
-        "reference_row_count": len(train),
+        "reference_row_count": len(split.train),
         "algorithm": "kmeans",
         "random_state": RANDOM_STATE,
         "n_init": 10,
     }
+
+
+def test_run_reuses_partition_for_training_and_artifact(
+    records, split, tmp_path, monkeypatch
+) -> None:
+    split_records = Mock(return_value=split)
+    fit = Mock(wraps=train.train_and_evaluate)
+    save = Mock(wraps=train.save_artifact)
+    monkeypatch.setattr(train, "load_from_db", lambda *_: records)
+    monkeypatch.setattr(train, "split_dataset", split_records)
+    monkeypatch.setattr(train, "train_and_evaluate", fit)
+    monkeypatch.setattr(train, "save_artifact", save)
+
+    train.run(db_path=str(tmp_path / "db.sqlite"), artifacts_dir=str(tmp_path))
+
+    split_records.assert_called_once_with(records)
+    assert fit.call_args.args[1] is split
+    assert save.call_args.kwargs["training_rows"] is split.train
 
 
 def test_constant_scores_allow_evaluation_but_prevent_artifact_publication(
@@ -159,7 +186,8 @@ def test_constant_scores_allow_evaluation_but_prevent_artifact_publication(
         **{MEMBER_ID: range(1, 21), TARGET: [0, 1] * 10}
     )
     model = LogisticRegressionRiskModel()
-    result = train_and_evaluate(model, constant_inputs)
+    split = split_dataset(constant_inputs)
+    result = train_and_evaluate(model, split)
 
     assert result.results_row["roc_auc"] == pytest.approx(0.5)
     assert "risk_bands" not in result.metadata
@@ -168,22 +196,24 @@ def test_constant_scores_allow_evaluation_but_prevent_artifact_publication(
             result,
             model.name,
             str(tmp_path),
-            training_rows=split_dataset(constant_inputs).train,
+            training_rows=split.train,
         )
     assert not list(tmp_path.iterdir())
 
 
-def test_retraining_keeps_the_older_version_addressable(records, tmp_path) -> None:
+def test_retraining_keeps_the_older_version_addressable(
+    records, split, tmp_path
+) -> None:
     model = LogisticRegressionRiskModel()
-    subsample = records.iloc[::2]
-    first = train_and_evaluate(model, records)
-    second = train_and_evaluate(model, subsample)
-    first_train = split_dataset(records).train
+    subsample_split = split_dataset(records.iloc[::2])
+    first = train_and_evaluate(model, split)
+    second = train_and_evaluate(model, subsample_split)
+    first_train = split.train
     first_path = save_artifact(
         first, model.name, str(tmp_path), training_rows=first_train
     )
     latest_path = save_artifact(
-        second, model.name, str(tmp_path), training_rows=split_dataset(subsample).train
+        second, model.name, str(tmp_path), training_rows=subsample_split.train
     )
     first_metadata = json.loads((first_path / "metadata.json").read_text())
     latest_metadata = json.loads((latest_path / "metadata.json").read_text())
@@ -205,12 +235,12 @@ def test_retraining_keeps_the_older_version_addressable(records, tmp_path) -> No
 
 
 def test_failed_save_does_not_advance_latest(
-    records, rf_result, tmp_path, monkeypatch
+    split, rf_result, tmp_path, monkeypatch
 ) -> None:
     model = RandomForestRiskModel()
-    train = split_dataset(records).train
+    train = split.train
     out = save_artifact(rf_result, model.name, str(tmp_path), training_rows=train)
-    second = train_and_evaluate(model, records)
+    second = train_and_evaluate(model, split)
 
     def fail_dump(*args, **kwargs):
         raise OSError("failed write")
@@ -224,13 +254,13 @@ def test_failed_save_does_not_advance_latest(
 
 @pytest.mark.parametrize("cuts", [[10, 10, 20, 30], [10, 20, 30, 100], [10, 20, 30]])
 def test_loader_rejects_invalid_saved_cut_points(
-    cuts, records, rf_result, tmp_path
+    cuts, split, rf_result, tmp_path
 ) -> None:
     out = save_artifact(
         rf_result,
         "random_forest",
         str(tmp_path),
-        training_rows=split_dataset(records).train,
+        training_rows=split.train,
     )
     path = out / "metadata.json"
     metadata = json.loads(path.read_text())
@@ -264,7 +294,7 @@ def test_results_row_round_trips_through_its_table(rf_result, tmp_path) -> None:
 
 
 def test_a_new_model_extends_the_framework_without_modifying_it(
-    records, tmp_path
+    split, tmp_path
 ) -> None:
     """Open/closed: a new RiskModel trains and writes to its own table, untouched base."""
 
@@ -274,7 +304,7 @@ def test_a_new_model_extends_the_framework_without_modifying_it(
         def build_estimator(self) -> BaseEstimator:
             return LogisticRegression(max_iter=1000)
 
-    result = train_and_evaluate(DummyRiskModel(), records)
+    result = train_and_evaluate(DummyRiskModel(), split)
 
     db = str(tmp_path / "results.db")
     save_model_results(result.results_row, table="dummy_model", db_path=db)

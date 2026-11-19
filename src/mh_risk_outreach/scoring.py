@@ -31,6 +31,20 @@ REASON_CHUNK_SIZE = 100
 CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
 # Batch and single-member predictions can differ by floating-point noise.
 RANK_SCORE_DECIMALS = 10
+RANK_SORT_KEYS = (
+    ("safety_review_required", False),
+    ("risk_score", False),
+    (MEMBER_ID, True),
+)
+RANK_ORDER = tuple(
+    (
+        f"{column} rounded to {RANK_SCORE_DECIMALS} decimals"
+        if column == "risk_score"
+        else column
+    )
+    + (" asc" if ascending else " desc")
+    for column, ascending in RANK_SORT_KEYS
+)
 
 
 def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
@@ -41,8 +55,8 @@ def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
 def rank_members(worklist: pd.DataFrame) -> pd.DataFrame:
     """Rank safety reviews first, then rounded scores descending and IDs ascending."""
     ranked = worklist.sort_values(
-        by=["safety_review_required", "risk_score", MEMBER_ID],
-        ascending=[False, False, True],
+        by=[column for column, _ in RANK_SORT_KEYS],
+        ascending=[ascending for _, ascending in RANK_SORT_KEYS],
         key=lambda column: (
             column.astype("float64").round(RANK_SCORE_DECIMALS)
             if column.name == "risk_score"

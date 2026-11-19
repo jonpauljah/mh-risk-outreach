@@ -76,7 +76,9 @@ def background(records: pd.DataFrame) -> pd.DataFrame:
 
 @pytest.fixture(scope="module")
 def lr_pipeline(records: pd.DataFrame):
-    return train_and_evaluate(LogisticRegressionRiskModel(), records).pipeline
+    return train_and_evaluate(
+        LogisticRegressionRiskModel(), split_dataset(records)
+    ).pipeline
 
 
 @pytest.fixture(scope="module")
@@ -241,6 +243,12 @@ def test_assign_bands_is_reproducible_and_ordered() -> None:
     assert np.all(np.diff(band_rank) >= 0)
 
 
+def test_assign_bands_treats_prediction_roundoff_as_cut_point_equality() -> None:
+    cut = CUT_POINTS[0]
+    scores = np.array([cut - 1e-11, np.nextafter(cut, -np.inf), cut])
+    assert assign_bands(scores, CUT_POINTS).tolist() == ["Very Low", "Low", "Low"]
+
+
 def test_scoring_is_deterministic(records, lr_pipeline, background) -> None:
     a = score_members(
         records,
@@ -305,7 +313,9 @@ def test_chunked_scoring_reports_progress_and_matches(
 
 def test_random_forest_also_scores_and_explains(records, background) -> None:
     """A tree model drops into the same scoring path (TreeExplainer reasons)."""
-    pipeline = train_and_evaluate(RandomForestRiskModel(), records).pipeline
+    pipeline = train_and_evaluate(
+        RandomForestRiskModel(), split_dataset(records)
+    ).pipeline
     result = score_members(
         records,
         pipeline,
@@ -392,6 +402,11 @@ def test_rank_members_uses_rounded_scores_and_member_id_for_ties() -> None:
         85.010000000001,
     ]
     assert ranked["reasoning"].tolist() == ["one", "five", "four", "two", "three"]
+    assert scoring.RANK_ORDER == (
+        "safety_review_required desc",
+        "risk_score rounded to 10 decimals desc",
+        "Member_ID asc",
+    )
 
 
 def test_populated_legacy_table_refreshes_atomically(worklist, tmp_path) -> None:
