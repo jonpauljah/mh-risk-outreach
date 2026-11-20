@@ -27,6 +27,7 @@ SCORES_COLUMNS: dict[str, str] = {
     "model_version": "TEXT NOT NULL",
     "risk_score": "REAL NOT NULL",
     "band_level_priority": "TEXT NOT NULL",
+    "safety_review_required": "INTEGER NOT NULL CHECK (safety_review_required IN (0, 1))",
     "rank_priority": "INTEGER NOT NULL",
     "reasoning": "TEXT NOT NULL",
 }
@@ -63,8 +64,9 @@ def save_member_scores(
 
     ``scores`` must contain every column in ``SCORES_COLUMNS``; extra columns are
     ignored. The table is created from the explicit schema first (never a
-    pandas-inferred one), then its rows are deleted and ``scores`` appended, so a
-    failure rolls the whole write back and leaves the previous worklist intact.
+    pandas-inferred one). The transaction deletes the old rows, adds the safety
+    column for legacy tables, and inserts the new scores. A failure leaves the
+    previous schema and rows intact.
     """
     table = scores_table_name(model_name)
     missing = sorted(set(SCORES_COLUMNS) - set(scores.columns))
@@ -72,13 +74,32 @@ def save_member_scores(
         raise KeyError(f"scores for {table!r} are missing columns: {missing}")
 
     rows = scores[list(SCORES_COLUMNS)]
+    columns = ", ".join(SCORES_COLUMNS)
+    placeholders = ", ".join("?" for _ in SCORES_COLUMNS)
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
         with conn:  # commits on success, rolls back on any exception
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(_create_sql(table))
             conn.execute(f"DELETE FROM {table}")
-            rows.to_sql(table, conn, if_exists="append", index=False)
+            existing_columns = {
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if "safety_review_required" not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN safety_review_required "
+                    f"{SCORES_COLUMNS['safety_review_required']}"
+                )
+            try:
+                conn.executemany(
+                    f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
+                    rows.itertuples(index=False, name=None),
+                )
+            except sqlite3.DatabaseError as exc:
+                raise pd.errors.DatabaseError(
+                    f"could not write {table}: {exc}"
+                ) from exc
     finally:
         conn.close()
 
@@ -88,7 +109,15 @@ def load_member_scores(model_name: str, db_path: str = DEFAULT_DB_PATH) -> pd.Da
     table = scores_table_name(model_name)
     conn = sqlite3.connect(db_path)
     try:
-        return pd.read_sql(f"SELECT * FROM {table} ORDER BY rank_priority", conn)
+        worklist = pd.read_sql(f"SELECT * FROM {table} ORDER BY rank_priority", conn)
+        if "safety_review_required" not in worklist:
+            raise ValueError(
+                f"{table} uses legacy risk bands; run scoring to refresh it"
+            )
+        worklist["safety_review_required"] = worklist["safety_review_required"].astype(
+            bool
+        )
+        return worklist[list(SCORES_COLUMNS)]
     finally:
         conn.close()
 

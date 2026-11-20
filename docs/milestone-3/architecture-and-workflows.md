@@ -1,14 +1,15 @@
 # Milestone 3 — Technical Architecture and Operational Workflows
 
-This document describes the **planned** workflow. The existing application
-and open proposals are distinguished below; see the [project plan](README.md)
-for issue status and implementation order.
+This document describes the operational scoring and persistence already
+available, along with the remaining Milestone 3 workflow. See the
+[project plan](README.md) for implementation order.
 
 ## System Architecture
 
 Python ETL imports the synthetic survey into SQLite `patients`. Python ML
 components train and compare Logistic Regression, Random Forest, and XGBoost;
-current scoring writes replaceable `<model>_scores` tables. Streamlit currently
+comparison scoring writes replaceable `<model>_scores` tables and operational
+scoring writes a separate `operational_scores` worklist. Streamlit currently
 displays member records, model evaluation, and risk scoring. See the existing
 [database](../milestone-1/database.md) and [risk-scoring](../risk-scoring.md)
 documentation for details.
@@ -16,12 +17,12 @@ documentation for details.
 | Component | Responsibility and status |
 | --- | --- |
 | `patients` and `<model>_scores` | Existing source records and replaceable model results; merged [#44](https://github.com/jonpauljah/mh-risk-outreach/pull/44) protects populated imports. |
-| `risk_assessments` | Historical input and scoring snapshots; storage proposed in open [#45](https://github.com/jonpauljah/mh-risk-outreach/pull/45). |
-| `member_assessment_state` | Reference to the latest submitted assessment, potentially pending; proposed in #45. |
-| `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome; storage proposed in #45. |
-| Scoring | Existing model scoring; planned operational selection, versioned boundaries, and assessment integration in [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34)–[#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35). |
+| `risk_assessments` | Historical input and scoring snapshots. [PR #45](https://github.com/jonpauljah/mh-risk-outreach/pull/45) implemented storage. |
+| `member_assessment_state` | Reference to the latest submitted assessment, potentially pending. PR #45 implemented this table. |
+| `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome. PR #45 implemented storage. |
+| Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) will integrate scoring and assessment persistence. |
 | NBA and eligibility | Planned deterministic action rules, safety routing, capacity, and transactional eligibility checks in [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36)–[#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37). |
-| Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides persistence operations, not the complete policy or UI. |
+| Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides the persistence operations. |
 
 ```mermaid
 flowchart LR
@@ -41,42 +42,41 @@ flowchart LR
     U --> A
 ```
 
-The diagram shows intended responsibilities, not completed integrations. [PR #46](https://github.com/jonpauljah/mh-risk-outreach/pull/46)
-is open: it removes safety flags from predictors and reevaluates the three models
-while retaining the existing safety override; it does not select an operational model.
+The diagram includes planned integrations with operational scoring. Merged
+[PR #46](https://github.com/jonpauljah/mh-risk-outreach/pull/46) removed safety
+flags from model predictors and reevaluated all three models.
 
 ## Risk Scoring and Assessment Workflow
 
-1. A manager explicitly triggers population-wide scoring. One selected,
-   identifiable operational model will serve outreach; all three remain available
-   for comparison. Five ordered model-derived bands, Very Low through Very High,
-   need saved boundaries per model version for repeatable individual assignment.
-   Historical ranks retain their cohort context. Existing batch K-means and its
-   safety-forced Very High priority do not yet meet this separation or stability
-   requirement; see [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34).
-2. Safety flags remain independent inputs for human review, even for a low model
-   band. They must use the latest member inputs, including a pending assessment.
-3. Until a first case is created, a member uses `patients` and operational score
-   results; scoring all 10,000 members must not create 10,000 assessment rows.
-   First case creation saves a baseline and case together. Open #45 implements
-   this using a supplied scoring result.
-4. A deliberate manual reassessment appends a full immutable input snapshot and
-   advances the current reference without changing `patients` or past cases.
-   It may remain `PendingScoring` until the next explicit scoring run. New inputs
-   must not be labeled with an older assessment's score. The open #45 persistence
-   layer finalizes only the latest pending assessment with a supplied result;
-   the scoring orchestration is still planned. Earlier pending snapshots remain
-   history if superseded before scoring.
+1. A manager explicitly runs the operational scoring CLI to refresh the
+   worklist for all imported members. Logistic regression is the configurable
+   default. All three models remain available for comparison. The scoring
+   paths share the five ordered bands saved with each version. See
+   [Risk scoring](../risk-scoring.md) for configuration and ordering.
+2. Safety flags use the latest member inputs, including pending
+   reassessments. A member can require safety review at any model band.
+   Flagged members rank first, followed by descending model score compared at
+   10 decimal places and ascending member ID for ties.
+3. The current worklist uses imported inputs or the latest finalized
+   assessment inputs. Running population scoring creates zero assessment
+   rows. At first case creation, the persistence API can save a baseline and
+   case together using a supplied score.
+4. A manual reassessment appends a full input snapshot, advances the current
+   reference, and stays `PendingScoring` until finalized. A pending member's
+   worklist score refers to prior inputs. Issue #34 computes the candidate
+   score and cohort rank using the worklist's model version. The persistence
+   API finalizes only the latest pending assessment once. Each scored
+   snapshot retains its model version and original cohort rank context.
+5. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) will
+   coordinate baseline and pending assessment scoring, synchronization
+   of the current reference, and publishing worklist changes after a
+   reassessment. Earlier pending snapshots remain in history when superseded.
 
-**Issue wording to update:** [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41)
-currently specifies immediate recalculation and atomic scored submission. Open
-#45 takes precedence: submission and scoring finalization are separate, with
-scoring initiated by an explicit manager-triggered run.
-[#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) also refers to a
-qualifying operational current assessment; its wording needs alignment with the
-current pointer advancing to pending inputs. The planned UI and eligibility
-policy must distinguish pending inputs from the last scored result, and pending
-safety signals must remain visible throughout.
+[#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) currently
+describes immediate recalculation and atomic scored submission. The
+implemented persistence contract separates submission from finalization.
+The planned UI and eligibility policy need to show the pending inputs,
+the last scored result, and any current safety flags.
 
 ## NBA Recommendation Workflow
 
@@ -90,10 +90,9 @@ can inform rules, but display text is not parsed as an input and SHAP is not
 causal evidence. See [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36).
 
 The intended history preserves recommendation and version alongside assessments
-and cases. A recommendation alone never creates a case. Open #45 stores supplied
-recommendation data but does not generate it; its pending assessment schema
-currently does not store a recommendation until scoring is finalized. How to
-display or preserve a safety recommendation while scoring is pending remains an
+and cases. A recommendation alone never creates a case. The #45 persistence
+API stores supplied recommendation data when scoring is finalized. Displaying
+and preserving a safety recommendation while scoring is pending remains an
 integration decision.
 
 ## Outreach Eligibility and Capacity
@@ -109,12 +108,11 @@ Configurable shared capacity **K** counts all Pending and Accepted cases. Standa
 slots are `max(0, K - active cases)`; necessary safety cases may exceed K under
 the safety exception. A completed case releases its slot, but repeat standard
 outreach requires a newer qualifying manual assessment and current eligibility;
-preview-only demo edits do not qualify. Open #45 requires a scored current
-assessment for a new case: a pending reassessment blocks case creation until an
-explicit scoring run finalizes it, even while its safety signals remain visible
-for review. The handling of a safety recommendation before scoring remains an
-integration decision. The
-manager-selected flow also needs the sponsor approval noted in #37.
+preview-only demo edits do not qualify. The #45 persistence API requires a
+scored current assessment for a new case. A pending reassessment blocks case
+creation until scoring finalizes it. Its safety flags still require review.
+Handling safety recommendations before scoring remains an integration decision.
+The manager-selected flow also needs the sponsor approval noted in #37.
 
 ## Case Lifecycle
 

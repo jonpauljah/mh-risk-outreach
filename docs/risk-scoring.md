@@ -1,10 +1,77 @@
-# Risk Scoring and Prioritization — Design & Decisions (Issue #16)
+# Risk Scoring and Prioritization
 
-**Status:** implemented on branch `16-Risk-Scores-and-Prioritization`. This file
-records the agreed approach and the decisions behind it (the issue's "record the
-decisions" item); the code that realises it is listed under
-[What shipped](#what-shipped), and [Handoff](#handoff-to-the-next-issue-dbstreamlit)
-maps the remaining DB↔Streamlit work to the next issue.
+## Operational worklist and comparison
+
+Run `uv run python -m mh_risk_outreach.scoring --operational` to replace the
+SQLite `operational_scores` worklist for all imported members. Logistic
+regression is the default. Set `MH_RISK_OUTREACH_OPERATIONAL_MODEL` to
+`logistic_regression`, `random_forest`, or `xgboost` to select the operational
+model. Scoring loads its latest trained version. See the
+[model selection rationale](ml-spec.md#operational-model-selection-issue-34).
+
+For comparison, `uv run python -m mh_risk_outreach.scoring --model all` refreshes
+all three independent `<model>_scores` tables on the held-out rows.
+`--model <name>` selects one model, and `--scope all` scores every imported
+member in comparison mode. The Model evaluation and Risk scoring pages
+continue to compare the three models. The Risk scoring page shows safety
+review separately from the model band. Rerun comparison scoring to refresh
+older tables.
+
+## Saved bands and contact order
+
+When publishing a model version, training fits seeded K-means with five
+centers on scores from the same rows used to fit the model. It saves the four
+adjacent midpoints alongside the ordered labels Very Low, Low, Medium,
+High, and Very High. The artifact's `metadata.json` records these cut points
+and their provenance under `risk_bands` in
+`artifacts/<model>/versions/<version>/`. Batch and individual scoring reuse
+the saved cut points from the same version used to calculate the score. A
+score at a cut point belongs to the higher band. On the 0–100 scale, a
+positive score less than `1e-12` below a cut point is treated as equality
+to absorb prediction round-off. Retrain legacy
+artifacts that lack saved cut points. The Model evaluation page can report
+metrics even when the predictions have too few distinct values for five bands.
+
+Band fitting and scoring use the same probability calculation. Logistic
+regression uses the same arithmetic for each row at any batch size. Random
+Forest adds tree probabilities in a fixed order. Refresh worklists generated
+before this scoring change to use the same calculation for the whole cohort.
+
+Either self-harm or suicidal-thought flags set `safety_review_required`. The
+score, band, and SHAP reason stay model-derived. Contact rank starts at 1
+and orders members requiring safety review first, then by descending score
+rounded to 10 decimal places for comparison, then by ascending `Member_ID`.
+The comparison precision groups nearly equal scores for tie-breaking. Stored
+scores keep their full precision.
+
+## Assessment scoring and historical ranks
+
+A population refresh uses each member's latest finalized assessment inputs
+when available, otherwise their imported inputs. A pending reassessment
+supplies the latest safety flags. The worklist marks `inputs_pending_scoring`
+and records `score_assessment_id` and `safety_assessment_id` when those inputs
+come from history. Population scoring leaves assessment history unchanged.
+If another refresh publishes while scoring is in progress, the earlier run
+leaves that published worklist in place and asks for a rerun.
+
+`mh_risk_outreach.operational.score_operational_member` takes a member ID
+and the complete survey input snapshot. It evaluates those inputs with the
+worklist's model version and computes the candidate's rank by substituting
+the candidate row in the same cohort. It returns score, band, rank,
+explanation, model, version, and cohort rank context for the issue #32
+persistence API. This calculation leaves the published worklist and
+assessment history unchanged. The context records the worklist ID,
+scope, size, calculation times, safety-review status, and ordering policy.
+Refresh the full worklist before ranking with a different operational model
+or a new version. Historical assessments keep their original ranks, contexts
+and versions. Issue #35 will coordinate baseline
+creation, finalization of pending reassessments, current references, and
+publishing the updated worklist after reassessment.
+
+## Issue #16 historical design
+
+The following sections record the initial implementation and its handoff to
+the comparison page. The worklist behavior above reflects issue #34.
 
 ## Deliverable
 

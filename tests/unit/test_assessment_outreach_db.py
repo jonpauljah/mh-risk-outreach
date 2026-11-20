@@ -230,6 +230,7 @@ def test_reimport_and_score_replacement_preserve_history(database):
         "model_version": ["v1"],
         "risk_score": [25.0],
         "band_level_priority": ["Low"],
+        "safety_review_required": [True],
         "rank_priority": [1],
         "reasoning": ["old worklist"],
     }

@@ -17,6 +17,8 @@ column, never a predictor.
 
 from pathlib import Path
 
+OPERATIONAL_MODEL_ENV = "MH_RISK_OUTREACH_OPERATIONAL_MODEL"
+
 # ---- Integer scales and counts (stored INTEGER) ----
 INTEGER_SCORES = [
     "Age",

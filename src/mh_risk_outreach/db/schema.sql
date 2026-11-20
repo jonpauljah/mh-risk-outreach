@@ -184,3 +184,24 @@ CREATE TABLE IF NOT EXISTS member_assessment_state (
     FOREIGN KEY (assessment_id, Member_ID)
       REFERENCES risk_assessments(assessment_id, Member_ID)
 );
+
+-- Replaceable operational projection. Case and assessment history lives above.
+CREATE TABLE IF NOT EXISTS operational_scores (
+    Member_ID INTEGER PRIMARY KEY REFERENCES patients(Member_ID),
+    operational_model_name TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    risk_score REAL NOT NULL CHECK (risk_score BETWEEN 0 AND 100),
+    band_level_priority TEXT NOT NULL,
+    rank_priority INTEGER NOT NULL UNIQUE CHECK (rank_priority > 0),
+    reasoning TEXT NOT NULL,
+    safety_review_required INTEGER NOT NULL CHECK (safety_review_required IN (0, 1)),
+    score_assessment_id INTEGER,
+    safety_assessment_id INTEGER,
+    inputs_pending_scoring INTEGER NOT NULL CHECK (inputs_pending_scoring IN (0, 1)),
+    cohort_id TEXT NOT NULL,
+    calculated_at TEXT NOT NULL,
+    FOREIGN KEY (score_assessment_id, Member_ID)
+      REFERENCES risk_assessments(assessment_id, Member_ID),
+    FOREIGN KEY (safety_assessment_id, Member_ID)
+      REFERENCES risk_assessments(assessment_id, Member_ID)
+);

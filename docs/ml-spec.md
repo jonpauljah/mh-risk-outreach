@@ -3,7 +3,11 @@
 
 This document walks through the design decisions for our ML approach: the algorithm, the training process, and the implementation. This file is subject to change throughout milestone 1.
 
-We will use a machine learning model to score each member's risk for mental health challenges. Instead of us writing every scoring rule by hand, the model learns how much each member attribute matters from labeled examples. Rules remain alongside the model for two cases: the safety override (any member reporting self-harm or suicidal thoughts is always high priority) and risk factors our dataset does not cover, such as missed appointments.
+We use a machine learning model that learns from labeled examples to score
+each member's risk for mental health challenges. Separate rules support
+safety review and can cover factors missing from the dataset, such as missed
+appointments. Members reporting self-harm or suicidal thoughts come first in
+contact order.
 
 This doc covers how we use ML to identify members at risk, how we train the model, how we observe and interpret its outputs, and how we improve it over time.
 
@@ -23,7 +27,7 @@ We hold back 20% of the real rows as a test set. The model never sees these duri
 
 Model quality is measured with recall, precision, PR-AUC, calibration, and
 precision at the available outreach capacity. These measures compare candidates;
-the choice of an operational model is a separate decision.
+issue #34 selected the operational default after the comparison.
 
 One known limitation: 92% of rows in the dataset are marked "yes". A model that
 always answers "yes" is therefore 92% accurate, so accuracy alone is not a
@@ -60,7 +64,7 @@ each kept column is transformed before training.
 | Group | Columns | Decision |
 | --- | --- | --- |
 | Symptoms (13) | `Feeling_Sad_Down`, `Loss_Of_Interest`, `Sleep_Trouble`, `Fatigue`, `Poor_Appetite_Or_Overeating`, `Feeling_Worthless`, `Concentration_Difficulty`, `Anxious_Nervous`, `Mood_Swings`, `Irritability`, `Obsessive_Thoughts`, `Compulsive_Behavior`, `Panic_Attacks` | Keep |
-| Safety flags (2) | `Self_Harm_Thoughts`, `Suicidal_Thoughts` | Exclude from model inputs; retain in storage for separate human-led safety review and the scoring override |
+| Safety flags (2) | `Self_Harm_Thoughts`, `Suicidal_Thoughts` | Store for human-led safety review and contact ordering outside the model |
 | History (2) | `Trauma_History`, `Family_History_Mental_Illness` | Keep |
 | Social (5) | `Social_Support`, `Feel_Understood`, `Loneliness`, `Close_Friends_Count`, `Discuss_Mental_Health` | Keep |
 | Stress and work (5) | `Financial_Stress`, `Work_Stress_Level`, `Job_Satisfaction`, `Work_Life_Balance`, `Ever_Bullied_At_Work` | Keep |
@@ -86,8 +90,8 @@ yes/no columns turns those 33 into the 42 numeric columns the model trains on.
 We exclude treatment status because it describes someone already identified;
 gender and country to reserve them for fairness checks; and fields a care
 organization is unlikely to hold. Safety flags are excluded because they
-trigger separate human-led review and a scoring override, independent of model
-probabilities.
+trigger separate human-led review and take precedence in contact ordering
+independently of model probabilities.
 
 The transformations put every column into a form the model can use:
 
@@ -326,7 +330,8 @@ in a separate segmentation step, as the model-choice analysis above concludes.)
 (recall, precision, PR-AUC, calibration/Brier) next to the majority baseline,
 plus reproducibility fields (`run_at`, `model_version`, `n_train`, `n_eval`,
 `random_state`). The fitted pipeline and a `metadata.json` are saved under
-`artifacts/<name>/` (git-ignored; reproducible from code and the fixed seed).
+`artifacts/<name>/versions/<version>/` (git-ignored). The plain-text
+`artifacts/<name>/latest` pointer selects the latest complete bundle.
 
 **Historical results before issue #33** (8,000 train / 2,000 eval, seed 42;
 the two safety flags were still model inputs):
@@ -366,7 +371,7 @@ path also generates readable SHAP explanations for Random Forest and XGBoost.
 The current model contract excludes `Self_Harm_Thoughts` and
 `Suicidal_Thoughts` from both 33 selected source inputs and 42 prepared numeric
 columns. The fields remain unchanged in the source CSV and the `patients`
-table. Scoring reads them separately for its safety override; they have no
+table. Scoring uses them for safety review and contact ordering. They have no
 model SHAP contributions. An existing artifact whose metadata still names
 either flag is rejected with a retraining message before it can score.
 
@@ -377,7 +382,7 @@ stratified split: 8,000 training rows and the same 2,000 held-out rows (1,843
 positive, 157 negative). The *unflagged* cohort is the 1,658 held-out rows
 where both safety flags are 0 (1,521 positive, 137 negative). It is a subset
 of the holdout, not a second training set; models were not fitted or tuned on it.
-The newly saved local artifact versions are
+The local artifact versions used for this reevaluation were
 `logistic_regression_20261116T211231Z`,
 `random_forest_20261116T211251Z`, and `xgboost_20261116T211307Z`.
 
@@ -413,12 +418,12 @@ applied separately to each model's unflagged holdout ranking.
 The answer is already positive for 91.7% of unflagged members, so accuracy or
 even 93–96 positives among 100 contacts cannot establish clinical usefulness.
 Random Forest finds one more positive than logistic regression in this sample,
-while logistic regression has lower Brier error. No operational model is
-selected here. The holdout contains only 137 unflagged negatives; these
-differences may be noisy. Brier is a summary error, not proof of calibration
-at each score level. The source label's meaning is not clinically validated,
-and these scores are outreach decision support, not a diagnosis or automated
-clinical decision. Safety flags still require independent human review.
+while logistic regression has lower Brier error. The holdout contains only
+137 unflagged negatives, so these differences may be noisy. Brier measures
+overall probability error. Calibration at specific score levels needs its
+own evaluation. The source label lacks clinical validation, and the scores
+support prototype outreach decisions. Safety flags require independent human
+review.
 
 To reproduce in a fresh checkout, import the unchanged CSV and retrain each
 model with the same default database and artifacts directory:
@@ -433,6 +438,24 @@ uv run python -m mh_risk_outreach.models.train --model xgboost
 The Model evaluation page shows full and unflagged comparisons, including
 precision@100. Local artifacts and SQLite result rows are ignored by Git. The
 page fits models in memory on the same split; scoring loads the saved artifacts.
+
+### Operational model selection (issue #34)
+
+The operational worklist defaults to `logistic_regression`. Set
+`MH_RISK_OUTREACH_OPERATIONAL_MODEL` to `logistic_regression`,
+`random_forest`, or `xgboost` to choose a registered model. All three remain
+available for comparison.
+
+On the unflagged holdout, logistic regression and Random Forest had similar
+ranking results. Their PR-AUC values were 0.945 and 0.946, their ROC-AUC values
+were 0.649 and 0.648, and they found 95 and 96 positive source labels among
+their first 100 members. XGBoost found 93, with PR-AUC 0.936 and ROC-AUC 0.624.
+Logistic regression had the lowest overall probability error by Brier score
+(0.074 versus 0.080 for Random Forest and 0.125 for XGBoost) and yields SHAP
+explanations from linear feature weights. That tradeoff supports the prototype
+default given the 91.7% positive-label prevalence and 137 negative labels in
+this sample. The bands are outreach worklist tiers without clinical cutoff
+validation.
 
 ## Training
 
@@ -568,58 +591,44 @@ number has no meaning; it only has to stay the same.
 
 #### 6. Priority bands
 
-Our architecture defines HIGH as a score of 80 to 100. A score is the model's
-estimate of how likely "yes" is, and 92% of rows are "yes", so nearly every
-member scores high. In the baseline run about 97% of members scored 80 or
-above. A worklist where 97% of members are HIGH tells a case manager nothing.
+With most source labels positive, model probabilities cluster toward the
+upper end of the scale. Artifact publication fits seeded one-dimensional
+K-means to the unrounded 0–100 scores from the partition used to fit the
+model. The four midpoints between the five ordered centers define Very Low,
+Low, Medium, High, and Very High. Batch and individual scoring share the
+saved boundaries and the same comparison rule. A score at a boundary enters
+the higher band. Positive scores less than `1e-12` below a boundary also enter
+that band to account for floating-point round-off.
 
-**Requirement:** prioritize by rank, not by fixed cutoffs. Sort by score and
-take the top K members, or define bands by position (for example, top 10% is
-HIGH).
-
-**Decided (issue #16):** bands are learned from the score distribution by
-K-means (`k=5`: Very High … Very Low) rather than fixed score cutoffs or fixed
-percentages, so no threshold is chosen in advance. The order within the worklist
-is a strict `rank_priority`, with the critical-indicator override pinning
-self-harm / suicidal members to the top. Quantile bands remain the documented
-fallback if the clusters prove too lopsided. See [Risk scoring](risk-scoring.md).
+Batch and individual scoring compute logistic regression probabilities with
+the same row-wise arithmetic. Random Forest combines tree probabilities in
+estimator order. Band fitting uses those same calculations.
 
 #### 7. Versioning
 
-We will retrain more than once, and each retrain produces different scores.
-If a member scores 87 one week and 74 the next, we need to know which model
-produced each score.
-
-**Requirement:** save each model under a version name (`model_v1`,
-`model_v2`) with a small file recording the date, the columns used, and the
-test results. Store the version name next to every score in the database.
+Each trained version has a `model.joblib` and `metadata.json`. The metadata
+records feature and evaluation details and a `risk_bands` section with
+the labels, four cut points, reference split and row count, and K-means
+settings. Retrain artifacts that lack the band metadata before scoring.
+Retained artifacts are loaded with their original valid K-means settings.
+Training retains previously published versioned bundles. Saved assessments
+keep their original scores, bands, ranks, and cohort context.
 
 # Scoring
 
-Scoring is how the trained model is used in the pipeline.
+The saved preprocessing and model pipeline returns a `risk_score` from
+0 to 100 for each member. The model score, band, and SHAP explanation use
+the trained model's inputs. Self-harm and suicidal-thought flags are
+reviewed separately. The worklist sorts by `safety_review_required` first,
+then descending model score rounded to 10 decimal places for rank comparisons,
+then ascending `Member_ID` for ties. The stored score keeps its original precision.
+`rank_priority` starts at 1 and gives the contact order for that cohort.
 
-1. Load the current model file (the saved `prepare → model` pipeline).
-2. Read member rows from the database; preparation runs inside the pipeline.
-3. The model returns a `risk_score` from 0 to 100 for each member.
-4. Assign a risk band (Very High … Very Low) by K-means on the scores, so the
-   band boundaries are learned from the data, not fixed in advance.
-5. Apply the safety override: any member with `Self_Harm_Thoughts = 1` or
-   `Suicidal_Thoughts = 1` is forced to the Very High band and the top of the
-   order regardless of score (`risk_score` is left raw so the override shows).
-6. Order members into a strict `rank_priority` (1 = contact first): criticals,
-   then by band, then by score.
-7. Build a short `reasoning` string from the model's SHAP contributions.
-8. Write `risk_score`, `band_level_priority`, `rank_priority`, `reasoning`, and
-   `model_version` to the database for the Prioritization stage.
-
-**Implementation (issue #16).** `mh_risk_outreach.scoring` produces the worklist
-and `mh_risk_outreach.reasons` turns SHAP contributions into readable text;
-`mh_risk_outreach.db.scores` writes one `<model>_scores` table per model
-(`logistic_regression_scores`, `random_forest_scores`, `xgboost_scores`), each
-replaced in a single transaction per run. Run it with
-`uv run python -m mh_risk_outreach.scoring --model <name>` (or `--model all`).
-The full design and the decisions behind the bands, the override, and the table
-columns are in [Risk scoring](risk-scoring.md).
+Run `uv run python -m mh_risk_outreach.scoring --operational` to publish
+the full worklist in `operational_scores`. For comparison, `--model <name>`
+or `--model all` refreshes the corresponding `<model>_scores` tables and
+defaults to the held-out rows. See [Risk scoring](risk-scoring.md) for
+worklist refresh and individual scoring.
 
 # Testing
 
@@ -738,8 +747,8 @@ XGBoost on the same split and compare all three on PR-AUC.
 - What `prepare()` does with a blank or unknown value in each column:
   reject the row or fill a default.
 - ~~How priority is assigned: top K members, or bands by percentage.~~
-  **Decided (issue #16):** K-means risk bands plus a strict `rank_priority`,
-  with the critical-indicator override; see [Risk scoring](risk-scoring.md).
+  Issues #16 and #34 established versioned K-means bands and a strict
+  `rank_priority` with independent safety review. See [Risk scoring](risk-scoring.md).
 - Where model files and the log table are stored. (Train/evaluation datasets
   need no such decision: `datasets.split_dataset` produces them in memory from
   the stored rows with a fixed seed, so they are reproduced on demand rather

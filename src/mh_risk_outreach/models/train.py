@@ -12,15 +12,16 @@ Run it:
 """
 
 import argparse
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
+from uuid import uuid4
 
-import joblib
+import pandas as pd
 import sklearn
 from sklearn.pipeline import Pipeline
 
+from mh_risk_outreach.bands import BAND_LABELS, BAND_N_INIT, fit_cut_points
 from mh_risk_outreach.config import (
     DEFAULT_DB_PATH,
     DEFAULT_TABLE,
@@ -28,7 +29,7 @@ from mh_risk_outreach.config import (
     TARGET,
     TEST_SIZE,
 )
-from mh_risk_outreach.datasets import split_dataset
+from mh_risk_outreach.datasets import DatasetSplit, split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.results import save_model_results
 from mh_risk_outreach.evaluation import (
@@ -38,10 +39,12 @@ from mh_risk_outreach.evaluation import (
 )
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
-from mh_risk_outreach.models.base import RiskModel
+from mh_risk_outreach.models.artifacts import (
+    DEFAULT_ARTIFACTS_DIR,
+    save_versioned_artifact,
+)
+from mh_risk_outreach.models.base import RiskModel, predict_risk_scores
 from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
-
-DEFAULT_ARTIFACTS_DIR = "artifacts"
 
 
 class TrainingResult(NamedTuple):
@@ -53,13 +56,12 @@ class TrainingResult(NamedTuple):
     report: str
 
 
-def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
-    """Split ``records``, fit on train only, score the held-out rows, measure.
+def train_and_evaluate(model: RiskModel, split: DatasetSplit) -> TrainingResult:
+    """Fit on the training split and measure performance on the held-out rows.
 
-    Returns the fitted pipeline, the flat results-table row, the richer metadata
-    dict (saved beside the artifact), and a plain-language report.
+    Returns the fitted pipeline, the flat results-table row, run metadata,
+    and a plain-language report.
     """
-    split = split_dataset(records)
     pipeline = model.build_pipeline()
     pipeline.fit(split.train, split.train[TARGET])
 
@@ -68,17 +70,26 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
     metrics = evaluate_scores(y_true, y_prob)
     baseline = majority_baseline(y_true)
 
-    run_at = datetime.now(UTC).isoformat(timespec="seconds")
-    version = f"{model.name}_{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    now = datetime.now(UTC)
+    run_at = now.isoformat(timespec="seconds")
+    version = f"{model.name}_{now:%Y%m%dT%H%M%SZ}_{uuid4().hex}"
     n_train, n_eval = len(split.train), len(split.evaluation)
 
     results_row: dict[str, object] = {
         "run_at": run_at,
         "model_version": version,
-        **{k: metrics[k] for k in (
-            "recall", "precision", "pr_auc", "roc_auc",
-            "accuracy", "negative_recall", "brier",
-        )},
+        **{
+            k: metrics[k]
+            for k in (
+                "recall",
+                "precision",
+                "pr_auc",
+                "roc_auc",
+                "accuracy",
+                "negative_recall",
+                "brier",
+            )
+        },
         "baseline_accuracy": baseline["accuracy"],
         "baseline_pr_auc": baseline["pr_auc"],
         "n_train": n_train,
@@ -102,16 +113,27 @@ def train_and_evaluate(model: RiskModel, records) -> TrainingResult:
 
 
 def save_artifact(
-    result: TrainingResult, model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
+    result: TrainingResult,
+    model_name: str,
+    artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
+    *,
+    training_rows: pd.DataFrame,
 ) -> Path:
-    """Save the fitted pipeline and its metadata under ``<artifacts_dir>/<name>/``."""
-    out = Path(artifacts_dir) / model_name
-    out.mkdir(parents=True, exist_ok=True)
-    joblib.dump(result.pipeline, out / "model.joblib")
-    (out / "metadata.json").write_text(
-        json.dumps(result.metadata, indent=2), encoding="utf-8"
-    )
-    return out
+    """Learn bands from the model's training rows and save the complete bundle."""
+    cut_points = fit_cut_points(predict_risk_scores(result.pipeline, training_rows))
+    metadata = {
+        **result.metadata,
+        "risk_bands": {
+            "labels": list(BAND_LABELS),
+            "cut_points": list(cut_points),
+            "reference_scope": "train",
+            "reference_row_count": len(training_rows),
+            "algorithm": "kmeans",
+            "random_state": RANDOM_STATE,
+            "n_init": BAND_N_INIT,
+        },
+    }
+    return save_versioned_artifact(result.pipeline, metadata, model_name, artifacts_dir)
 
 
 def run(
@@ -129,23 +151,31 @@ def run(
         raise SystemExit(f"unknown model {model_name!r}; choose from: {known}")
 
     records = load_from_db(db_path, table)
-    result = train_and_evaluate(model, records)
+    split = split_dataset(records)
+    result = train_and_evaluate(model, split)
+    out = save_artifact(result, model.name, artifacts_dir, training_rows=split.train)
     save_model_results(result.results_row, table=model.name, db_path=db_path)
-    out = save_artifact(result, model.name, artifacts_dir)
 
     print(result.report)
-    print(f"\nSaved model to {out}\nWrote results row to table {model.name!r} in {db_path}")
+    print(
+        f"\nSaved model to {out}\nWrote results row to table {model.name!r} in {db_path}"
+    )
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train and evaluate a risk model.")
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL, choices=sorted(REGISTRY), help="model to train"
+        "--model",
+        default=DEFAULT_MODEL,
+        choices=sorted(REGISTRY),
+        help="model to train",
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite path")
     parser.add_argument("--table", default=DEFAULT_TABLE, help="source records table")
-    parser.add_argument("--artifacts", default=DEFAULT_ARTIFACTS_DIR, help="artifacts dir")
+    parser.add_argument(
+        "--artifacts", default=DEFAULT_ARTIFACTS_DIR, help="artifacts dir"
+    )
     args = parser.parse_args()
     run(args.model, db_path=args.db, table=args.table, artifacts_dir=args.artifacts)
 

@@ -16,7 +16,7 @@ import streamlit as st
 from sklearn.metrics import precision_recall_curve, roc_curve
 
 from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID, TARGET
-from mh_risk_outreach.datasets import assert_disjoint, split_dataset
+from mh_risk_outreach.datasets import DatasetSplit, assert_disjoint, split_dataset
 from mh_risk_outreach.db.repository import database_status, load_from_db
 from mh_risk_outreach.db.results import load_model_results
 from mh_risk_outreach.evaluation import (
@@ -59,10 +59,10 @@ def _load(db_path: str, table: str) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner="Training models on the 80% training split...")
-def _train(model_name: str, _records: pd.DataFrame, row_count: int):
+def _train(model_name: str, _split: DatasetSplit, row_count: int):
     """Fit one model and score the held-out rows; cached per model and data size."""
-    result = train_and_evaluate(REGISTRY[model_name](), _records)
-    evaluation = split_dataset(_records).evaluation
+    result = train_and_evaluate(REGISTRY[model_name](), _split)
+    evaluation = _split.evaluation
     y_prob = result.pipeline.predict_proba(evaluation)[:, 1]
     return result, evaluation[TARGET].to_numpy(dtype=int), y_prob
 
@@ -218,8 +218,8 @@ def main() -> None:
         st.info("Pick at least one model.")
         st.stop()
 
-    scores = {name: _train(name, records, row_count) for name in names}
     split = split_dataset(records)
+    scores = {name: _train(name, split, row_count) for name in names}
     try:
         assert_disjoint(split)
         split_ok = True

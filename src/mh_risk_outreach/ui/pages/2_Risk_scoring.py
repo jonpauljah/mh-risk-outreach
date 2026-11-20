@@ -15,25 +15,23 @@ Streamlit lists this page automatically beside ``ui/app.py``.
 """
 
 import time
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from mh_risk_outreach.bands import BAND_LABELS
 from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
 from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db import scores as scores_db
 from mh_risk_outreach.db.repository import database_status, load_from_db
 from mh_risk_outreach.models import REGISTRY
 from mh_risk_outreach.models import train as model_training
-from mh_risk_outreach.scoring import (
-    BAND_LABELS,
-    CRITICAL_REASON,
+from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
     artifact_model_version,
-    load_scoring_pipeline,
-    score_members,
+    load_scoring_artifact,
 )
+from mh_risk_outreach.scoring import score_members
 
 IMPORT_COMMAND = "uv run python -m mh_risk_outreach.etl.pipeline"
 
@@ -41,10 +39,11 @@ IMPORT_COMMAND = "uv run python -m mh_risk_outreach.etl.pipeline"
 RESULTS_KEY = "risk_scoring_results"
 
 DISPLAY_COLUMNS = {
-    "rank_priority": "Priority",
+    "rank_priority": "Contact rank",
     MEMBER_ID: "Member ID",
     "risk_score": "Risk score",
     "band_level_priority": "Risk band",
+    "safety_review_required": "Safety review required",
     "reasoning": "Reason",
 }
 
@@ -54,21 +53,19 @@ def _load(db_path: str, table: str) -> pd.DataFrame:
     return load_from_db(db_path, table)
 
 
-def _model_version(model_name: str, artifacts_dir: str) -> str | None:
-    """Return the version only when the artifact matches current model inputs."""
-    try:
-        return artifact_model_version(model_name, artifacts_dir)
-    except (TypeError, ValueError):
-        return None
-
-
 def _model_status(
     names: list[str], n_members: int, artifacts_dir: str, db_path: str, locked: bool
 ) -> bool:
     """Show one status card per selected model; return True if all are trained."""
     all_ready = True
     for column, name in zip(st.columns(len(names)), names, strict=True):
-        version = _model_version(name, artifacts_dir)
+        try:
+            version = artifact_model_version(name, artifacts_dir)
+        except (TypeError, ValueError):
+            version = None
+            stale = True
+        else:
+            stale = False
         with column.container(border=True):
             st.markdown(f"**{name}**")
             if version:
@@ -76,7 +73,6 @@ def _model_status(
                 st.caption(f"Model version `{version}`")
                 continue
             all_ready = False
-            stale = (Path(artifacts_dir) / name / "model.joblib").exists()
             st.markdown("⚠️ Needs retraining" if stale else "⚠️ Not trained yet")
             if not locked and st.button("Train", key=f"train_{name}"):
                 with st.spinner(f"Training {name}..."):
@@ -98,7 +94,7 @@ def _run_scoring(
     bars = {name: st.progress(0.0, text=f"{name}: waiting") for name in names}
     results: dict[str, dict] = {}
     for name in names:
-        pipeline, version = load_scoring_pipeline(name, artifacts_dir)
+        artifact = load_scoring_artifact(name, artifacts_dir)
         bar = bars[name]
 
         def update(fraction: float, name: str = name, bar=bar) -> None:
@@ -111,8 +107,7 @@ def _run_scoring(
         start = time.perf_counter()
         computed = score_members(
             members,
-            pipeline,
-            model_version=version,
+            artifact,
             background=background,
             progress=update,
         )
@@ -141,12 +136,6 @@ def _show_results(results: dict[str, dict]) -> None:
             f"in {run['seconds']:.1f}s · {bands}"
         )
         table = worklist[list(DISPLAY_COLUMNS)].rename(columns=DISPLAY_COLUMNS)
-        # The override prefix is long and identical, so show it as its own column
-        # and keep the Reason column for the member's actual drivers.
-        prefix = f"{CRITICAL_REASON}; "
-        flagged = table["Reason"].str.startswith(prefix)
-        table.insert(4, "Safety flag", flagged)
-        table["Reason"] = table["Reason"].str.removeprefix(prefix)
         st.dataframe(
             table,
             hide_index=True,
@@ -155,8 +144,9 @@ def _show_results(results: dict[str, dict]) -> None:
                 "Risk score": st.column_config.ProgressColumn(
                     "Risk score", min_value=0, max_value=100, format="%.1f"
                 ),
-                "Safety flag": st.column_config.CheckboxColumn(
-                    "Safety flag", help="Self-harm or suicidal thoughts: top priority"
+                "Safety review required": st.column_config.CheckboxColumn(
+                    "Safety review required",
+                    help="Reported self-harm or suicidal thoughts",
                 ),
                 "Reason": st.column_config.TextColumn("Reason", width="large"),
             },
@@ -170,9 +160,10 @@ def main() -> None:
         "Run the trained models on members they have never seen and compare the "
         "outreach worklists they produce. Each member gets a **risk score** (the "
         "model's estimated chance of a mental health issue, 0-100), a **risk band**, "
-        "a **priority** (1 = contact first), and a short **reason** naming the "
-        "answers that pushed their score up. Members who reported self-harm or "
-        "suicidal thoughts always go to the top."
+        "and a short **reason** naming the answers that pushed their score up. "
+        "**Contact rank** is relative to the members in this run, with 1 first. "
+        "Members requiring safety review are ranked first, then members are "
+        "ordered by model score and ties by member ID."
     )
 
     exists, row_count = database_status(DEFAULT_DB_PATH, DEFAULT_TABLE)
@@ -207,13 +198,14 @@ def main() -> None:
 
     st.markdown(
         f"**Output:** for each of the {len(members):,} held-out members — risk score, "
-        "SHAP-based reason, risk band, and priority order, in one table per model."
+        "SHAP-based reason, risk band, safety review flag, and contact rank, "
+        "in one table per model."
     )
     if "random_forest" in names and not locked:
         st.caption("Random Forest explanations are slow: expect several minutes.")
 
     action = st.empty()
-    if locked:
+    if results is not None:
         if action.button("Reset", type="secondary"):
             del st.session_state[RESULTS_KEY]
             st.rerun()
@@ -225,9 +217,13 @@ def main() -> None:
         return
     if action.button("Run", type="primary"):
         action.empty()
-        st.session_state[RESULTS_KEY] = _run_scoring(
-            names, members, split.train, DEFAULT_ARTIFACTS_DIR, DEFAULT_DB_PATH
-        )
+        try:
+            st.session_state[RESULTS_KEY] = _run_scoring(
+                names, members, split.train, DEFAULT_ARTIFACTS_DIR, DEFAULT_DB_PATH
+            )
+        except SystemExit as exc:
+            action.error(str(exc))
+            return
         st.rerun()
 
 

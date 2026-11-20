@@ -1,151 +1,77 @@
-"""Score members, explain the score, and order the outreach worklist (issue #16).
-
-This is the scoring stage from docs/ml-spec.md, implemented per the decisions in
-docs/risk-scoring.md. For a trained model it produces, per member:
-
-* ``risk_score``          – the model's probability of an issue, as 0-100.
-* ``band_level_priority`` – a risk band (Very High … Very Low), found by K-means
-  on the scores so the boundaries are learned from the data, not fixed in advance.
-* ``rank_priority``       – a strict contact order, 1 = contact first.
-* ``reasoning``           – a short SHAP-based description of the top drivers.
-
-A **critical-indicator override** (``Self_Harm_Thoughts`` or
-``Suicidal_Thoughts`` = 1) forces a member to the Very High band and to the top
-of the rank, regardless of score; ``risk_score`` is left raw so the override is
-visible and the reason names it.
+"""Score members, explain model predictions, and order a comparison worklist.
 
 Run it:
-    uv run python -m mh_risk_outreach.scoring                 # logistic_regression
+    uv run python -m mh_risk_outreach.scoring
     uv run python -m mh_risk_outreach.scoring --model random_forest
     uv run python -m mh_risk_outreach.scoring --model all --scope all
+    uv run python -m mh_risk_outreach.scoring --operational
 """
 
 import argparse
-import json
 from collections.abc import Callable
-from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.pipeline import Pipeline
 
-from mh_risk_outreach.config import (
-    DEFAULT_DB_PATH,
-    DEFAULT_TABLE,
-    MEMBER_ID,
-    RANDOM_STATE,
-)
+from mh_risk_outreach.bands import BAND_LABELS, assign_bands
+from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
 from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.scores import save_member_scores
-from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
-from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
+from mh_risk_outreach.models.artifacts import (
+    DEFAULT_ARTIFACTS_DIR,
+    ScoringArtifact,
+    load_scoring_artifact,
+)
+from mh_risk_outreach.models.base import predict_risk_scores
 from mh_risk_outreach.reasons import build_reasons
 
-DEFAULT_ARTIFACTS_DIR = "artifacts"
-
-# Members explained per SHAP call when reporting progress. SHAP is the slow step
-# (minutes for Random Forest), so it runs in chunks of this size.
+# Members explained per SHAP call when reporting progress.
 REASON_CHUNK_SIZE = 100
-
-# Lowest band first; index doubles as the within-band ordering weight.
-BAND_LABELS: tuple[str, ...] = ("Very Low", "Low", "Medium", "High", "Very High")
-TOP_BAND = BAND_LABELS[-1]
-
-# Members with either of these set to 1 are the critical-indicator override.
 CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
-CRITICAL_REASON = "critical indicator (self-harm / suicidal thoughts), safety override"
-
-
-def artifact_model_version(
-    model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
-) -> str | None:
-    """Read a saved version only when its feature contract matches this code.
-
-    Return ``None`` when no model has been saved. A model trained with an older
-    feature set must be retrained before scoring; loading its pickle could
-    otherwise produce an incorrect score or a preparation error.
-    """
-    folder = Path(artifacts_dir) / model_name
-    model_path = folder / "model.joblib"
-    if not model_path.exists():
-        return None
-    try:
-        metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"invalid metadata for {model_name}: {exc}") from exc
-    if not isinstance(metadata, dict):
-        raise TypeError(f"invalid metadata for {model_name}: expected an object")
-    if (
-        metadata.get("model_name") != model_name
-        or metadata.get("model_features") != list(MODEL_FEATURES)
-        or metadata.get("prepared_column_count") != PREPARED_COLUMN_COUNT
-        or not metadata.get("model_version")
-    ):
-        raise ValueError(
-            f"saved {model_name} artifact uses an outdated feature contract"
-        )
-    return str(metadata["model_version"])
-
-
-def load_scoring_pipeline(
-    model_name: str, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
-) -> tuple[Pipeline, str]:
-    """Load a saved model and version after checking its feature contract."""
-    folder = Path(artifacts_dir) / model_name
-    try:
-        version = artifact_model_version(model_name, artifacts_dir)
-    except (TypeError, ValueError) as exc:
-        raise SystemExit(
-            f"{exc}; retrain with "
-            f"`uv run python -m mh_risk_outreach.models.train --model {model_name}`"
-        ) from exc
-    if version is None:
-        raise SystemExit(
-            f"no saved model at {folder / 'model.joblib'}; train it first with "
-            f"`uv run python -m mh_risk_outreach.models.train --model {model_name}`"
-        )
-    pipeline = joblib.load(folder / "model.joblib")
-    return pipeline, version
-
-
-def assign_bands(scores: np.ndarray) -> np.ndarray:
-    """Map scores to the five risk bands with 1-D K-means (learned boundaries).
-
-    Clusters are ordered by centre and spread across ``BAND_LABELS`` so the
-    lowest-scoring cluster is "Very Low" and the highest "Very High". With fewer
-    distinct scores than labels (only in tiny inputs), the available clusters are
-    spread evenly across the five names. ``RANDOM_STATE`` makes it reproducible.
-    """
-    scores = np.asarray(scores, dtype=float)
-    distinct = np.unique(scores)
-    k = min(len(BAND_LABELS), len(distinct))
-    if k <= 1:  # every score identical: one band, the top
-        return np.full(len(scores), TOP_BAND, dtype=object)
-
-    kmeans = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10)
-    clusters = kmeans.fit_predict(scores.reshape(-1, 1))
-    centres = kmeans.cluster_centers_.ravel()
-    # rank 0 = lowest-centre cluster ... rank k-1 = highest.
-    rank_of_cluster = {
-        cluster: rank for rank, cluster in enumerate(np.argsort(centres))
-    }
-    label_for_rank = [
-        BAND_LABELS[round(rank / (k - 1) * (len(BAND_LABELS) - 1))] for rank in range(k)
-    ]
-    return np.array(
-        [label_for_rank[rank_of_cluster[c]] for c in clusters], dtype=object
+# Batch and single-member predictions can differ by floating-point noise.
+RANK_SCORE_DECIMALS = 10
+RANK_SORT_KEYS = (
+    ("safety_review_required", False),
+    ("risk_score", False),
+    (MEMBER_ID, True),
+)
+RANK_ORDER = tuple(
+    (
+        f"{column} rounded to {RANK_SCORE_DECIMALS} decimals"
+        if column == "risk_score"
+        else column
     )
+    + (" asc" if ascending else " desc")
+    for column, ascending in RANK_SORT_KEYS
+)
+
+
+def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
+    """Mark members who reported self-harm or suicidal thoughts."""
+    return records[list(CRITICAL_INDICATORS)].eq(1).any(axis=1).to_numpy(dtype=bool)
+
+
+def rank_members(worklist: pd.DataFrame) -> pd.DataFrame:
+    """Rank safety reviews first, then rounded scores descending and IDs ascending."""
+    ranked = worklist.sort_values(
+        by=[column for column, _ in RANK_SORT_KEYS],
+        ascending=[ascending for _, ascending in RANK_SORT_KEYS],
+        key=lambda column: (
+            column.astype("float64").round(RANK_SCORE_DECIMALS)
+            if column.name == "risk_score"
+            else column
+        ),
+    ).reset_index(drop=True)
+    ranked["rank_priority"] = np.arange(1, len(ranked) + 1)
+    return ranked
 
 
 def score_members(
     records: pd.DataFrame,
-    pipeline: Pipeline,
+    artifact: ScoringArtifact,
     *,
-    model_version: str,
     background: pd.DataFrame,
     progress: Callable[[float], None] | None = None,
     chunk_size: int = REASON_CHUNK_SIZE,
@@ -159,55 +85,27 @@ def score_members(
     with the fraction done (0-1] after each chunk.
 
     Columns: ``Member_ID``, ``model_version``, ``risk_score`` (0-100),
-    ``band_level_priority``, ``rank_priority`` (1 = contact first), ``reasoning``.
+    ``band_level_priority``, ``safety_review_required``,
+    ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
     """
-    risk_score = pipeline.predict_proba(records)[:, 1] * 100.0
-    bands = assign_bands(risk_score)
+    risk_score = predict_risk_scores(artifact.pipeline, records)
+    bands = assign_bands(risk_score, artifact.cut_points)
     reasons = build_reasons(
-        pipeline, records, background, chunk_size=chunk_size, progress=progress
+        artifact.pipeline, records, background, chunk_size=chunk_size, progress=progress
     )
 
-    critical = np.zeros(len(records), dtype=bool)
-    for column in CRITICAL_INDICATORS:
-        critical |= records[column].to_numpy() == 1
-
-    bands = np.where(
-        critical, TOP_BAND, bands
-    )  # override pins criticals to the top band
-    reasons = [
-        f"{CRITICAL_REASON}; {reason}" if flag else reason
-        for reason, flag in zip(reasons, critical, strict=True)
-    ]
-
-    band_order = {label: index for index, label in enumerate(BAND_LABELS)}
     worklist = pd.DataFrame(
         {
             MEMBER_ID: records[MEMBER_ID].to_numpy(),
-            "model_version": model_version,
+            "model_version": artifact.model_version,
             "risk_score": risk_score,
             "band_level_priority": bands,
+            "safety_review_required": safety_review_flags(records),
             "reasoning": reasons,
-            "_critical": critical,
-            "_band_rank": [band_order[band] for band in bands],
         }
     )
-    # Criticals first, then higher band, then higher score; ties by Member_ID.
-    worklist = worklist.sort_values(
-        by=["_critical", "_band_rank", "risk_score", MEMBER_ID],
-        ascending=[False, False, False, True],
-    ).reset_index(drop=True)
-    worklist["rank_priority"] = np.arange(1, len(worklist) + 1)
-    return worklist.drop(columns=["_critical", "_band_rank"])[
-        [
-            MEMBER_ID,
-            "model_version",
-            "risk_score",
-            "band_level_priority",
-            "rank_priority",
-            "reasoning",
-        ]
-    ]
+    return rank_members(worklist)
 
 
 def _summary(model_name: str, worklist: pd.DataFrame) -> str:
@@ -240,10 +138,8 @@ def run(
     split = split_dataset(records)
     target = split.evaluation if scope == "evaluation" else records
 
-    pipeline, model_version = load_scoring_pipeline(model_name, artifacts_dir)
-    worklist = score_members(
-        target, pipeline, model_version=model_version, background=split.train
-    )
+    artifact = load_scoring_artifact(model_name, artifacts_dir)
+    worklist = score_members(target, artifact, background=split.train)
     save_member_scores(worklist, model_name, db_path=db_path)
 
     print(_summary(model_name, worklist))
@@ -255,32 +151,59 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Score members and build the worklist."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
         choices=[*sorted(REGISTRY), "all"],
-        help="model to score with, or 'all'",
+        help="comparison model to score with, or 'all'",
+    )
+    mode.add_argument(
+        "--operational",
+        action="store_true",
+        help="score the full operational population",
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite path")
-    parser.add_argument("--table", default=DEFAULT_TABLE, help="source records table")
+    parser.add_argument("--table", help="source records table for comparison scoring")
     parser.add_argument(
         "--artifacts", default=DEFAULT_ARTIFACTS_DIR, help="artifacts dir"
     )
     parser.add_argument(
         "--scope",
-        default="evaluation",
         choices=["evaluation", "all"],
         help="score the held-out evaluation rows (default) or every member",
     )
     args = parser.parse_args()
-    models = sorted(REGISTRY) if args.model == "all" else [args.model]
+    if args.operational:
+        if args.scope is not None or args.table is not None:
+            parser.error("--operational always scores the full patients table")
+        from mh_risk_outreach.operational import (
+            OPERATIONAL_SCOPE,
+            refresh_operational_worklist,
+        )
+
+        try:
+            worklist = refresh_operational_worklist(
+                db_path=args.db, artifacts_dir=args.artifacts
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        model = str(worklist["operational_model_name"].iat[0])
+        version = worklist["model_version"].iat[0]
+        print(
+            f"Operational model: {model}, version: {version}, scope: {OPERATIONAL_SCOPE}"
+        )
+        print(_summary(model, worklist))
+        print(f"  wrote {len(worklist):,} rows to operational_scores in {args.db}")
+        return
+
+    models = sorted(REGISTRY) if args.model == "all" else [args.model or DEFAULT_MODEL]
     for model_name in models:
         run(
             model_name,
             db_path=args.db,
-            table=args.table,
+            table=args.table or DEFAULT_TABLE,
             artifacts_dir=args.artifacts,
-            scope=args.scope,
+            scope=args.scope or "evaluation",
         )
 
 
