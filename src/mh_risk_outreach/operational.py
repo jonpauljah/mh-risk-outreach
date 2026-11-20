@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import UTC, datetime
+from functools import partial
 from uuid import uuid4
 
 import pandas as pd
@@ -13,8 +14,13 @@ from mh_risk_outreach.config import (
     MEMBER_ID,
     OPERATIONAL_MODEL_ENV,
 )
+from mh_risk_outreach.config import (
+    OPERATIONAL_SCOPE as OPERATIONAL_SCOPE,  # noqa: PLC0414
+)
 from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.operational_scores import (
+    AssessmentInputs,
+    assessment_score_payload,
     load_operational_inputs,
     load_operational_scores,
     save_operational_scores,
@@ -23,17 +29,15 @@ from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
+    ScoringArtifact,
     artifact_model_version,
     load_scoring_artifact,
 )
 from mh_risk_outreach.scoring import (
     CRITICAL_INDICATORS,
-    RANK_ORDER,
     rank_members,
     score_members,
 )
-
-OPERATIONAL_SCOPE = "all_imported_members"
 
 
 def operational_model_name() -> str:
@@ -45,13 +49,100 @@ def operational_model_name() -> str:
     return model
 
 
+def _validate_active_artifact(artifact: ScoringArtifact, artifacts_dir: str) -> None:
+    model = operational_model_name()
+    if (
+        model != artifact.model_name
+        or artifact_model_version(model, artifacts_dir) != artifact.model_version
+    ):
+        raise ValueError("operational model changed during scoring; run scoring again")
+
+
 def refresh_operational_worklist(
     *, db_path: str = DEFAULT_DB_PATH, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
 ) -> pd.DataFrame:
     """Score all imported members and atomically replace the operational worklist."""
     model = operational_model_name()
     artifact = load_scoring_artifact(model, artifacts_dir)
-    patients, assessment_inputs, cohort_id = load_operational_inputs(db_path)
+    patients, assessment_inputs, cohort = load_operational_inputs(db_path)
+    worklist = _build_operational_worklist(patients, assessment_inputs, artifact)
+    save_operational_scores(
+        worklist,
+        expected_inputs=assessment_inputs,
+        expected_cohort_id=cohort.cohort_id if cohort else None,
+        validate_model=partial(_validate_active_artifact, artifact, artifacts_dir),
+        db_path=db_path,
+    )
+    return worklist
+
+
+def finalize_operational_reassessment(
+    assessment_id: int,
+    *,
+    recommendation_action: str | None = None,
+    recommendation_reason: str | None = None,
+    recommendation_rule_version: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+    artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
+) -> None:
+    """Finalize the current pending reassessment and publish its updated cohort."""
+    patients, assessment_inputs, cohort = load_operational_inputs(db_path)
+    pending = next(
+        (
+            assessment
+            for assessment in assessment_inputs
+            if assessment.current_id == assessment_id
+            and assessment.status == "PendingScoring"
+        ),
+        None,
+    )
+    if pending is None:
+        raise ValueError("assessment must be the current pending reassessment")
+    if cohort is None:
+        raise ValueError(
+            "no operational worklist; run scoring with --operational first"
+        )
+    model = operational_model_name()
+    if (
+        model != cohort.model_name
+        or artifact_model_version(model, artifacts_dir) != cohort.model_version
+    ):
+        raise ValueError(
+            "operational model changed; refresh scoring with --operational"
+        )
+    artifact = load_scoring_artifact(model, artifacts_dir, version=cohort.model_version)
+    worklist = _build_operational_worklist(
+        patients, assessment_inputs, artifact, pending_id=assessment_id
+    )
+    row = worklist.loc[worklist[MEMBER_ID].eq(pending.member_id)].iloc[0]
+    result = assessment_score_payload(
+        row,
+        cohort_id=str(row["cohort_id"]),
+        cohort_calculated_at=str(row["calculated_at"]),
+        cohort_size=len(worklist),
+    )
+    result.update(
+        recommendation_action=recommendation_action,
+        recommendation_reason=recommendation_reason,
+        recommendation_rule_version=recommendation_rule_version,
+    )
+    save_operational_scores(
+        worklist,
+        expected_inputs=assessment_inputs,
+        expected_cohort_id=cohort.cohort_id,
+        reassessment=(assessment_id, result),
+        validate_model=partial(_validate_active_artifact, artifact, artifacts_dir),
+        db_path=db_path,
+    )
+
+
+def _build_operational_worklist(
+    patients: pd.DataFrame,
+    assessment_inputs: list[AssessmentInputs],
+    artifact: ScoringArtifact,
+    *,
+    pending_id: int | None = None,
+) -> pd.DataFrame:
     if patients.empty:
         raise ValueError(
             "import the patient dataset before running operational scoring"
@@ -61,8 +152,12 @@ def refresh_operational_worklist(
     provenance = {}
     for assessment in assessment_inputs:
         member_id = assessment.member_id
-        if assessment.scored_inputs is not None:
-            stored_inputs = json.loads(assessment.scored_inputs)
+        is_finalizing = assessment.current_id == pending_id
+        scored_inputs = (
+            assessment.current_inputs if is_finalizing else assessment.scored_inputs
+        )
+        if scored_inputs is not None:
+            stored_inputs = json.loads(scored_inputs)
             members.loc[member_id, FEATURES] = [
                 stored_inputs[name] for name in FEATURES
             ]
@@ -72,9 +167,9 @@ def refresh_operational_worklist(
             latest_inputs[name] for name in CRITICAL_INDICATORS
         ]
         provenance[member_id] = (
-            assessment.scored_id,
+            assessment.current_id if is_finalizing else assessment.scored_id,
             assessment.current_id,
-            assessment.status == "PendingScoring",
+            assessment.status == "PendingScoring" and not is_finalizing,
         )
 
     worklist = score_members(
@@ -94,18 +189,10 @@ def refresh_operational_worklist(
         ],
         columns=source_columns,
     ).astype({"score_assessment_id": "Int64", "safety_assessment_id": "Int64"})
-    worklist["operational_model_name"] = model
+    worklist["operational_model_name"] = artifact.model_name
     worklist["cohort_id"] = uuid4().hex
     worklist["calculated_at"] = datetime.now(UTC).isoformat()
 
-    if artifact_model_version(model, artifacts_dir) != artifact.model_version:
-        raise ValueError("operational model changed during scoring; run scoring again")
-    save_operational_scores(
-        worklist,
-        expected_inputs=assessment_inputs,
-        expected_cohort_id=cohort_id,
-        db_path=db_path,
-    )
     return worklist
 
 
@@ -146,20 +233,11 @@ def score_operational_member(
     peers = cohort.loc[~cohort[MEMBER_ID].eq(member_id), list(candidate.columns)]
     ranked = rank_members(pd.concat([peers, candidate], ignore_index=True))
     row = ranked.loc[ranked[MEMBER_ID].eq(member_id)].iloc[0]
-    return {
-        "risk_score": float(row["risk_score"]),
-        "band_level_priority": str(row["band_level_priority"]),
-        "rank_priority": int(row["rank_priority"]),
-        "explanation": str(row["reasoning"]),
-        "operational_model_name": model,
-        "model_version": version,
-        "rank_context": {
-            "cohort_id": str(cohort["cohort_id"].iat[0]),
-            "cohort_calculated_at": str(cohort["calculated_at"].iat[0]),
-            "calculated_at": datetime.now(UTC).isoformat(),
-            "scope": OPERATIONAL_SCOPE,
-            "cohort_size": len(cohort),
-            "safety_review_required": bool(row["safety_review_required"]),
-            "ordering": list(RANK_ORDER),
-        },
-    }
+    row["operational_model_name"] = model
+    return assessment_score_payload(
+        row,
+        cohort_id=str(cohort["cohort_id"].iat[0]),
+        cohort_calculated_at=str(cohort["calculated_at"].iat[0]),
+        cohort_size=len(cohort),
+        calculated_at=datetime.now(UTC).isoformat(),
+    )

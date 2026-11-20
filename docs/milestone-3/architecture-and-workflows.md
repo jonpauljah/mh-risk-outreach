@@ -20,7 +20,7 @@ documentation for details.
 | `risk_assessments` | Historical input and scoring snapshots. [PR #45](https://github.com/jonpauljah/mh-risk-outreach/pull/45) implemented storage. |
 | `member_assessment_state` | Reference to the latest submitted assessment, potentially pending. PR #45 implemented this table. |
 | `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome. PR #45 implemented storage. |
-| Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) will integrate scoring and assessment persistence. |
+| Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) connects scoring and assessment persistence for first-case baselines and explicit reassessment finalization. |
 | NBA and eligibility | Planned deterministic action rules, safety routing, capacity, and transactional eligibility checks in [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36)–[#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37). |
 | Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides the persistence operations. |
 
@@ -58,19 +58,20 @@ flags from model predictors and reevaluated all three models.
    Flagged members rank first, followed by descending model score compared at
    10 decimal places and ascending member ID for ties.
 3. The current worklist uses imported inputs or the latest finalized
-   assessment inputs. Running population scoring creates zero assessment
-   rows. At first case creation, the persistence API can save a baseline and
-   case together using a supplied score.
+   assessment inputs. Population scoring creates no assessment rows. At
+   first case creation, the persistence API saves the baseline, current
+   reference, and case in one transaction. It uses a supplied score or
+   copies the member's row from the published worklist.
 4. A manual reassessment appends a full input snapshot, advances the current
-   reference, and stays `PendingScoring` until finalized. A pending member's
-   worklist score refers to prior inputs. Issue #34 computes the candidate
-   score and cohort rank using the worklist's model version. The persistence
-   API finalizes only the latest pending assessment once. Each scored
-   snapshot retains its model version and original cohort rank context.
-5. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) will
-   coordinate baseline and pending assessment scoring, synchronization
-   of the current reference, and publishing worklist changes after a
-   reassessment. Earlier pending snapshots remain in history when superseded.
+   reference, and stays `PendingScoring` until finalized. A refresh uses prior
+   scored inputs for the model and the pending inputs for safety flags.
+   Earlier pending snapshots remain in history when superseded.
+5. The explicit backend scoring operation finalizes the latest pending
+   assessment and publishes an updated population worklist in the same
+   transaction. The assessment archives the row's score, explanation, band,
+   rank, and cohort and model metadata. An unused scored current assessment
+   with a matching stored recommendation action can supply a later case.
+   Subsequent refreshes leave those historical snapshots intact.
 
 [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) currently
 describes immediate recalculation and atomic scored submission. The

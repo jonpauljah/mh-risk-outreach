@@ -88,6 +88,25 @@ FEATURES = NUMERIC + CATEGORICAL  # all 50 stored source features
 TARGET = "Has_Mental_Health_Issue"  # the Y answer key (never a feature)
 MEMBER_ID = "Member_ID"  # surrogate key added during transform
 
+OPERATIONAL_SCOPE = "all_imported_members"
+# Batch and single-member predictions can differ by floating-point noise.
+RANK_SCORE_DECIMALS = 10
+RANK_SORT_KEYS = (
+    ("safety_review_required", False),
+    ("risk_score", False),
+    (MEMBER_ID, True),
+)
+RANK_ORDER = tuple(
+    (
+        f"{column} rounded to {RANK_SCORE_DECIMALS} decimals"
+        if column == "risk_score"
+        else column
+    )
+    + (" asc" if ascending else " desc")
+    for column, ascending in RANK_SORT_KEYS
+)
+
+
 # ---- Default paths and table name ----
 DEFAULT_CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "mental_health.csv"
 DEFAULT_DB_PATH = "patients.db"

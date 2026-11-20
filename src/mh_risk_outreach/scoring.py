@@ -14,7 +14,14 @@ import numpy as np
 import pandas as pd
 
 from mh_risk_outreach.bands import BAND_LABELS, assign_bands
-from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
+from mh_risk_outreach.config import (
+    DEFAULT_DB_PATH,
+    DEFAULT_TABLE,
+    MEMBER_ID,
+    RANK_SCORE_DECIMALS,
+    RANK_SORT_KEYS,
+)
+from mh_risk_outreach.config import RANK_ORDER as RANK_ORDER  # noqa: PLC0414
 from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.db.scores import save_member_scores
@@ -30,22 +37,6 @@ from mh_risk_outreach.reasons import build_reasons
 # Members explained per SHAP call when reporting progress.
 REASON_CHUNK_SIZE = 100
 CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
-# Batch and single-member predictions can differ by floating-point noise.
-RANK_SCORE_DECIMALS = 10
-RANK_SORT_KEYS = (
-    ("safety_review_required", False),
-    ("risk_score", False),
-    (MEMBER_ID, True),
-)
-RANK_ORDER = tuple(
-    (
-        f"{column} rounded to {RANK_SCORE_DECIMALS} decimals"
-        if column == "risk_score"
-        else column
-    )
-    + (" asc" if ascending else " desc")
-    for column, ascending in RANK_SORT_KEYS
-)
 
 
 def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
