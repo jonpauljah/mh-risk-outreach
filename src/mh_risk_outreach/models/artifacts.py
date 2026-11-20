@@ -8,8 +8,7 @@ from typing import NamedTuple
 import joblib
 from sklearn.pipeline import Pipeline
 
-from mh_risk_outreach.bands import BAND_LABELS, BAND_N_INIT, validate_cut_points
-from mh_risk_outreach.config import RANDOM_STATE
+from mh_risk_outreach.bands import BAND_LABELS, validate_cut_points
 from mh_risk_outreach.model_inputs import MODEL_FEATURES
 from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
 
@@ -59,6 +58,9 @@ def _check_bands(metadata: dict, version: str) -> tuple[float, ...]:
     if not isinstance(bands, dict):
         raise TypeError("invalid frozen risk band metadata: expected an object")
     reference_count = bands.get("reference_row_count")
+    random_state = bands.get("random_state")
+    training_seed = metadata.get("random_state")
+    n_init = bands.get("n_init")
     if (
         bands.get("labels") != list(BAND_LABELS)
         or bands.get("reference_scope") != "train"
@@ -66,8 +68,12 @@ def _check_bands(metadata: dict, version: str) -> tuple[float, ...]:
         or reference_count < len(BAND_LABELS)
         or reference_count != metadata.get("n_train")
         or bands.get("algorithm") != "kmeans"
-        or bands.get("random_state") != RANDOM_STATE
-        or bands.get("n_init") != BAND_N_INIT
+        or type(random_state) is not int
+        or random_state < 0
+        or type(training_seed) is not int
+        or random_state != training_seed
+        or type(n_init) is not int
+        or n_init < 1
     ):
         raise ValueError("invalid frozen risk band metadata")
     return validate_cut_points(bands.get("cut_points"))

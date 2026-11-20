@@ -10,10 +10,36 @@ open/closed boundary — extension by subclass, no modification of the workflow.
 
 from abc import ABC, abstractmethod
 
+import numpy as np
+import pandas as pd
+from joblib import parallel_config
+from scipy.special import expit  # type: ignore[import-untyped]
 from sklearn.base import BaseEstimator
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 from mh_risk_outreach.prepare import build_preparation_pipeline
+
+
+def predict_risk_scores(pipeline: Pipeline, records: pd.DataFrame) -> np.ndarray:
+    """Return positive-class scores on the 0–100 scale with stable row arithmetic."""
+    steps = getattr(pipeline, "named_steps", {})
+    model = steps.get("model")
+    if isinstance(model, LogisticRegression) and len(model.classes_) == 2:
+        prepared = steps["prepare"].transform(records)
+        values = np.ascontiguousarray(prepared.to_numpy(dtype=float))
+        # A fixed reduction avoids different BLAS paths for a row and a batch.
+        logits = (
+            np.einsum("ij,j->i", values, model.coef_[0], optimize=False)
+            + model.intercept_[0]
+        )
+        return expit(logits) * 100.0
+    if isinstance(model, RandomForestClassifier):
+        # Sum the tree probabilities in estimator order for each prediction.
+        with parallel_config(backend="sequential"):
+            return pipeline.predict_proba(records)[:, 1] * 100.0
+    return pipeline.predict_proba(records)[:, 1] * 100.0
 
 
 class RiskModel(ABC):

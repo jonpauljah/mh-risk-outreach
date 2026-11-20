@@ -32,12 +32,17 @@ to absorb prediction round-off. Retrain legacy
 artifacts that lack saved cut points. The Model evaluation page can report
 metrics even when the predictions have too few distinct values for five bands.
 
+Band fitting and scoring use the same probability calculation. Logistic
+regression uses the same arithmetic for each row at any batch size. Random
+Forest adds tree probabilities in a fixed order. Refresh worklists generated
+before this scoring change to use the same calculation for the whole cohort.
+
 Either self-harm or suicidal-thought flags set `safety_review_required`. The
 score, band, and SHAP reason stay model-derived. Contact rank starts at 1
 and orders members requiring safety review first, then by descending score
 rounded to 10 decimal places for comparison, then by ascending `Member_ID`.
-This comparison precision absorbs small numerical differences between batch
-and individual predictions. Stored scores keep their original precision.
+The comparison precision groups nearly equal scores for tie-breaking. Stored
+scores keep their full precision.
 
 ## Assessment scoring and historical ranks
 

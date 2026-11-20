@@ -107,9 +107,7 @@ def _run_scoring(
         start = time.perf_counter()
         computed = score_members(
             members,
-            artifact.pipeline,
-            model_version=artifact.model_version,
-            cut_points=artifact.cut_points,
+            artifact,
             background=background,
             progress=update,
         )

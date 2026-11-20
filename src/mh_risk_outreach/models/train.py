@@ -43,7 +43,7 @@ from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
     save_versioned_artifact,
 )
-from mh_risk_outreach.models.base import RiskModel
+from mh_risk_outreach.models.base import RiskModel, predict_risk_scores
 from mh_risk_outreach.prepare import PREPARED_COLUMN_COUNT
 
 
@@ -120,9 +120,7 @@ def save_artifact(
     training_rows: pd.DataFrame,
 ) -> Path:
     """Learn bands from the model's training rows and save the complete bundle."""
-    cut_points = fit_cut_points(
-        result.pipeline.predict_proba(training_rows)[:, 1] * 100.0
-    )
+    cut_points = fit_cut_points(predict_risk_scores(result.pipeline, training_rows))
     metadata = {
         **result.metadata,
         "risk_bands": {

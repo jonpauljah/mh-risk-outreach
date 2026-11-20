@@ -22,7 +22,7 @@ from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
     load_scoring_artifact,
 )
-from mh_risk_outreach.models.base import RiskModel
+from mh_risk_outreach.models.base import RiskModel, predict_risk_scores
 from mh_risk_outreach.models.logistic_regression import LogisticRegressionRiskModel
 from mh_risk_outreach.models.random_forest import RandomForestRiskModel
 from mh_risk_outreach.models.train import save_artifact, train_and_evaluate
@@ -107,6 +107,23 @@ def test_random_forest_beats_the_majority_baseline(records, rf_result) -> None:
     # Baseline PR-AUC on the same eval share equals the positive prevalence.
     baseline = majority_baseline(records[TARGET])
     assert rf_result.results_row["pr_auc"] >= baseline["pr_auc"]
+
+
+def test_predicted_scores_match_estimator_and_are_stable_across_batch_sizes(
+    records, split, rf_result
+) -> None:
+    logistic = train_and_evaluate(LogisticRegressionRiskModel(), split)
+    batch = records.iloc[:16]
+    for pipeline in (logistic.pipeline, rf_result.pipeline):
+        expected = pipeline.predict_proba(batch)[:, 1] * 100.0
+        scores = predict_risk_scores(pipeline, batch)
+        np.testing.assert_allclose(scores, expected, atol=1e-12, rtol=0)
+        np.testing.assert_array_equal(scores, predict_risk_scores(pipeline, batch))
+        singles = [
+            predict_risk_scores(pipeline, batch.iloc[[index]])[0]
+            for index in range(len(batch))
+        ]
+        np.testing.assert_array_equal(scores, singles)
 
 
 def test_saved_and_reloaded_model_scores_identically(
@@ -215,7 +232,13 @@ def test_retraining_keeps_the_older_version_addressable(
     latest_path = save_artifact(
         second, model.name, str(tmp_path), training_rows=subsample_split.train
     )
-    first_metadata = json.loads((first_path / "metadata.json").read_text())
+    first_metadata_path = first_path / "metadata.json"
+    first_metadata = json.loads(first_metadata_path.read_text())
+    # Simulate a retained bundle published with earlier training settings.
+    first_metadata["random_state"] = RANDOM_STATE + 1
+    first_metadata["risk_bands"]["random_state"] = RANDOM_STATE + 1
+    first_metadata["risk_bands"]["n_init"] += 1
+    first_metadata_path.write_text(json.dumps(first_metadata))
     latest_metadata = json.loads((latest_path / "metadata.json").read_text())
     older_version = str(first.metadata["model_version"])
     latest = load_scoring_artifact(model.name, str(tmp_path))
@@ -269,6 +292,33 @@ def test_loader_rejects_invalid_saved_cut_points(
 
     with pytest.raises(SystemExit, match="cut points.*retrain"):
         load_scoring_artifact("random_forest", str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("band_settings", "training_seed"),
+    [
+        ({"random_state": -1}, -1),
+        ({"random_state": True}, 1),
+        ({"random_state": 1}, True),
+        ({"random_state": RANDOM_STATE + 1}, RANDOM_STATE),
+        ({"n_init": 0}, RANDOM_STATE),
+        ({"n_init": True}, RANDOM_STATE),
+    ],
+)
+def test_loader_rejects_invalid_band_provenance(
+    band_settings, training_seed, split, rf_result, tmp_path
+) -> None:
+    out = save_artifact(
+        rf_result, "random_forest", str(tmp_path), training_rows=split.train
+    )
+    path = out / "metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata["random_state"] = training_seed
+    metadata["risk_bands"].update(band_settings)
+    path.write_text(json.dumps(metadata))
+
+    with pytest.raises(ValueError, match="invalid frozen risk band metadata"):
+        artifact_model_version("random_forest", str(tmp_path))
 
 
 def test_legacy_artifact_with_current_features_requires_retraining(

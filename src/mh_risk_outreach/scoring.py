@@ -8,11 +8,10 @@ Run it:
 """
 
 import argparse
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
-from sklearn.pipeline import Pipeline
 
 from mh_risk_outreach.bands import BAND_LABELS, assign_bands
 from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
@@ -22,8 +21,10 @@ from mh_risk_outreach.db.scores import save_member_scores
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
+    ScoringArtifact,
     load_scoring_artifact,
 )
+from mh_risk_outreach.models.base import predict_risk_scores
 from mh_risk_outreach.reasons import build_reasons
 
 # Members explained per SHAP call when reporting progress.
@@ -69,10 +70,8 @@ def rank_members(worklist: pd.DataFrame) -> pd.DataFrame:
 
 def score_members(
     records: pd.DataFrame,
-    pipeline: Pipeline,
+    artifact: ScoringArtifact,
     *,
-    model_version: str,
-    cut_points: Sequence[float],
     background: pd.DataFrame,
     progress: Callable[[float], None] | None = None,
     chunk_size: int = REASON_CHUNK_SIZE,
@@ -90,16 +89,16 @@ def score_members(
     ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
     """
-    risk_score = pipeline.predict_proba(records)[:, 1] * 100.0
-    bands = assign_bands(risk_score, cut_points)
+    risk_score = predict_risk_scores(artifact.pipeline, records)
+    bands = assign_bands(risk_score, artifact.cut_points)
     reasons = build_reasons(
-        pipeline, records, background, chunk_size=chunk_size, progress=progress
+        artifact.pipeline, records, background, chunk_size=chunk_size, progress=progress
     )
 
     worklist = pd.DataFrame(
         {
             MEMBER_ID: records[MEMBER_ID].to_numpy(),
-            "model_version": model_version,
+            "model_version": artifact.model_version,
             "risk_score": risk_score,
             "band_level_priority": bands,
             "safety_review_required": safety_review_flags(records),
@@ -140,13 +139,7 @@ def run(
     target = split.evaluation if scope == "evaluation" else records
 
     artifact = load_scoring_artifact(model_name, artifacts_dir)
-    worklist = score_members(
-        target,
-        artifact.pipeline,
-        model_version=artifact.model_version,
-        cut_points=artifact.cut_points,
-        background=split.train,
-    )
+    worklist = score_members(target, artifact, background=split.train)
     save_member_scores(worklist, model_name, db_path=db_path)
 
     print(_summary(model_name, worklist))

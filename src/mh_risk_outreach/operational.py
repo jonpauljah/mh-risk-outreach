@@ -79,9 +79,7 @@ def refresh_operational_worklist(
 
     worklist = score_members(
         members.reset_index(drop=True),
-        artifact.pipeline,
-        model_version=artifact.model_version,
-        cut_points=artifact.cut_points,
+        artifact,
         background=background,
     )
     source_columns = [
@@ -142,9 +140,7 @@ def score_operational_member(
     background = split_dataset(load_from_db(db_path).sort_values(MEMBER_ID)).train
     candidate = score_members(
         pd.DataFrame([{MEMBER_ID: member_id, **inputs}]),
-        artifact.pipeline,
-        model_version=version,
-        cut_points=artifact.cut_points,
+        artifact,
         background=background,
     )
     peers = cohort.loc[~cohort[MEMBER_ID].eq(member_id), list(candidate.columns)]

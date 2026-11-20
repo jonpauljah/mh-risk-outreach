@@ -75,19 +75,17 @@ def background(records: pd.DataFrame) -> pd.DataFrame:
 
 
 @pytest.fixture(scope="module")
-def lr_pipeline(records: pd.DataFrame):
-    return train_and_evaluate(
-        LogisticRegressionRiskModel(), split_dataset(records)
-    ).pipeline
+def lr_artifact(records: pd.DataFrame) -> ScoringArtifact:
+    model = LogisticRegressionRiskModel()
+    pipeline = train_and_evaluate(model, split_dataset(records)).pipeline
+    return ScoringArtifact(model.name, "test_v1", pipeline, CUT_POINTS)
 
 
 @pytest.fixture(scope="module")
-def worklist(records: pd.DataFrame, lr_pipeline, background) -> pd.DataFrame:
+def worklist(records: pd.DataFrame, lr_artifact, background) -> pd.DataFrame:
     return score_members(
         records,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     )
 
@@ -122,7 +120,7 @@ def test_critical_indicators_take_the_top_priority(records, worklist) -> None:
 
 
 def test_a_low_scoring_critical_member_is_still_top_priority(
-    records, lr_pipeline, background
+    records, lr_artifact, background
 ) -> None:
     """Safety review determines contact order even when the model score is low."""
     calm = records.sort_values("Has_Mental_Health_Issue").iloc[0].copy()
@@ -135,9 +133,7 @@ def test_a_low_scoring_critical_member_is_still_top_priority(
 
     result = score_members(
         frame,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     )
     flagged = result[result[MEMBER_ID] == frame[MEMBER_ID].iloc[-1]].iloc[0]
@@ -152,7 +148,7 @@ def test_a_low_scoring_critical_member_is_still_top_priority(
 
 @pytest.mark.parametrize("flag", CRITICAL_INDICATORS)
 def test_safety_flag_changes_rank_without_changing_model_outputs(
-    records, lr_pipeline, background, flag
+    records, lr_artifact, background, flag
 ) -> None:
     base = records.loc[
         (records["Self_Harm_Thoughts"] == 0) & (records["Suicidal_Thoughts"] == 0)
@@ -165,9 +161,7 @@ def test_safety_flag_changes_rank_without_changing_model_outputs(
 
     scored = score_members(
         frame,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     ).set_index(MEMBER_ID)
 
@@ -207,7 +201,7 @@ def test_old_artifact_requires_retraining_before_unpickling(tmp_path) -> None:
 
 
 def test_maxed_symptoms_score_higher_than_zeroed(
-    records, lr_pipeline, background
+    records, lr_artifact, background
 ) -> None:
     base = records.iloc[0].copy()
     high, low = base.copy(), base.copy()
@@ -219,9 +213,7 @@ def test_maxed_symptoms_score_higher_than_zeroed(
 
     scored = score_members(
         frame,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     ).set_index(MEMBER_ID)
     assert scored.loc[1, "risk_score"] > scored.loc[2, "risk_score"]
@@ -249,34 +241,28 @@ def test_assign_bands_treats_prediction_roundoff_as_cut_point_equality() -> None
     assert assign_bands(scores, CUT_POINTS).tolist() == ["Very Low", "Low", "Low"]
 
 
-def test_scoring_is_deterministic(records, lr_pipeline, background) -> None:
+def test_scoring_is_deterministic(records, lr_artifact, background) -> None:
     a = score_members(
         records,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     )
     b = score_members(
         records,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
     )
     pd.testing.assert_frame_equal(a, b)
 
 
 def test_model_outputs_do_not_depend_on_the_batch(
-    records, lr_pipeline, background, worklist
+    records, lr_artifact, background, worklist
 ) -> None:
     """A member scored alone gets the same model outputs as in the batch."""
     for member in records[MEMBER_ID].iloc[:5]:
         alone = score_members(
             records[records[MEMBER_ID] == member],
-            lr_pipeline,
-            model_version="test_v1",
-            cut_points=CUT_POINTS,
+            lr_artifact,
             background=background,
         )
         in_batch = worklist[worklist[MEMBER_ID] == member]
@@ -292,15 +278,13 @@ def test_model_outputs_do_not_depend_on_the_batch(
 
 
 def test_chunked_scoring_reports_progress_and_matches(
-    records, lr_pipeline, background, worklist
+    records, lr_artifact, background, worklist
 ) -> None:
     """Explaining in chunks reports rising progress to 1.0 and changes nothing."""
     seen: list[float] = []
     chunked = score_members(
         records,
-        lr_pipeline,
-        model_version="test_v1",
-        cut_points=CUT_POINTS,
+        lr_artifact,
         background=background,
         progress=seen.append,
         chunk_size=7,
@@ -318,9 +302,7 @@ def test_random_forest_also_scores_and_explains(records, background) -> None:
     ).pipeline
     result = score_members(
         records,
-        pipeline,
-        model_version="rf_test",
-        cut_points=CUT_POINTS,
+        ScoringArtifact("random_forest", "rf_test", pipeline, CUT_POINTS),
         background=background,
     )
     assert result["risk_score"].between(0, 100).all()

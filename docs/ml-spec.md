@@ -600,12 +600,17 @@ saved boundaries and the same comparison rule. A score at a boundary enters
 the higher band. Positive scores less than `1e-12` below a boundary also enter
 that band to account for floating-point round-off.
 
+Batch and individual scoring compute logistic regression probabilities with
+the same row-wise arithmetic. Random Forest combines tree probabilities in
+estimator order. Band fitting uses those same calculations.
+
 #### 7. Versioning
 
 Each trained version has a `model.joblib` and `metadata.json`. The metadata
 records feature and evaluation details and a `risk_bands` section with
 the labels, four cut points, reference split and row count, and K-means
 settings. Retrain artifacts that lack the band metadata before scoring.
+Retained artifacts are loaded with their original valid K-means settings.
 Training retains previously published versioned bundles. Saved assessments
 keep their original scores, bands, ranks, and cohort context.
 
