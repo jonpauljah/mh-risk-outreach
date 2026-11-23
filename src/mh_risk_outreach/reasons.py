@@ -14,7 +14,7 @@ One engine covers all three models (see docs/risk-scoring.md):
 Everything here reads a fitted pipeline and member rows; it fits nothing.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -163,6 +163,28 @@ def build_reasons(
     raw training rows the pipeline was fitted on; ``chunk_size`` and ``progress``
     are passed to ``shap_contributions``.
     """
+    reasons, _ = build_reasons_and_contributions(
+        pipeline,
+        records,
+        background,
+        top_n=top_n,
+        chunk_size=chunk_size,
+        progress=progress,
+    )
+    return reasons
+
+
+def build_reasons_and_contributions(
+    pipeline: Pipeline,
+    records: pd.DataFrame,
+    background: pd.DataFrame,
+    *,
+    contribution_rows: Iterable[int] = (),
+    top_n: int = DEFAULT_TOP_N,
+    chunk_size: int | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> tuple[list[str], dict[int, dict[str, float]]]:
+    """Build reasons and return named SHAP contributions for selected row positions."""
     prepared = _prepared_frame(pipeline, records)
     contributions = shap_contributions(
         pipeline.named_steps["model"],
@@ -187,4 +209,8 @@ def build_reasons(
             if phrase and phrase not in phrases:
                 phrases.append(phrase)
         reasons.append(", ".join(phrases) if phrases else _NO_DRIVERS)
-    return reasons
+    named_contributions = {
+        row: dict(zip(columns, map(float, contributions[row]), strict=True))
+        for row in contribution_rows
+    }
+    return reasons, named_contributions

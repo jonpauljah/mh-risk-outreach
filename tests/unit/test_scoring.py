@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mh_risk_outreach import scoring
+from mh_risk_outreach import reasons, scoring
 from mh_risk_outreach.bands import BAND_LABELS, assign_bands
 from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID
 from mh_risk_outreach.datasets import split_dataset
@@ -35,6 +35,7 @@ from mh_risk_outreach.models.random_forest import RandomForestRiskModel
 from mh_risk_outreach.models.train import train_and_evaluate
 from mh_risk_outreach.scoring import (
     CRITICAL_INDICATORS,
+    SHAP_CONTRIBUTIONS,
     rank_members,
     score_members,
 )
@@ -221,6 +222,41 @@ def test_maxed_symptoms_score_higher_than_zeroed(
 
 def test_reasoning_is_present_and_readable(worklist) -> None:
     assert (worklist["reasoning"].str.len() > 0).all()
+    assert SHAP_CONTRIBUTIONS not in worklist
+
+
+def test_structured_contributions_stay_with_requested_member_after_sorting(
+    records, lr_artifact, background, monkeypatch
+) -> None:
+    frame = records.iloc[:2].copy().set_axis([30, 10])
+    frame[MEMBER_ID] = [101, 102]
+    frame["Self_Harm_Thoughts"] = [0, 1]
+    frame["Suicidal_Thoughts"] = 0
+    calls = []
+
+    def contributions(_, prepared, *args, **kwargs):
+        calls.append(prepared)
+        signed = pd.DataFrame(0.0, index=prepared.index, columns=prepared.columns)
+        signed["Age"] = [-0.5, 0.75]
+        signed["Social_Support"] = [1.25, -1.5]
+        return signed.to_numpy()
+
+    monkeypatch.setattr(reasons, "shap_contributions", contributions)
+    sorted_rows = score_members(
+        frame, lr_artifact, background=background, contributions_for_member=101
+    )
+
+    assert len(calls) == 1
+    assert sorted_rows[MEMBER_ID].tolist() == [102, 101]
+    assert sorted_rows[SHAP_CONTRIBUTIONS].iat[0] is None
+    captured = sorted_rows[SHAP_CONTRIBUTIONS].iat[1]
+    assert set(captured) == set(calls[0].columns)
+    assert captured["Age"] == -0.5
+    assert captured["Social_Support"] == 1.25
+    assert (
+        reasons.build_reasons(lr_artifact.pipeline, frame, background)
+        == sorted_rows["reasoning"].iloc[::-1].tolist()
+    )
 
 
 def test_assign_bands_is_reproducible_and_ordered() -> None:
@@ -446,8 +482,8 @@ def test_comparison_cli_uses_each_models_own_cut_points(
     monkeypatch.setattr(scoring, "load_scoring_artifact", load_artifact)
     monkeypatch.setattr(
         scoring,
-        "build_reasons",
-        lambda _, frame, *args, **kwargs: ["reason"] * len(frame),
+        "build_reasons_and_contributions",
+        lambda _, frame, *args, **kwargs: (["reason"] * len(frame), {}),
     )
     monkeypatch.setattr(
         sys,

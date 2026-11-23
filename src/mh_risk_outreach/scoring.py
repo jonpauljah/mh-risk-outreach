@@ -15,6 +15,9 @@ import pandas as pd
 
 from mh_risk_outreach.bands import BAND_LABELS, assign_bands
 from mh_risk_outreach.config import (
+    CRITICAL_INDICATORS as CRITICAL_INDICATORS,  # noqa: PLC0414
+)
+from mh_risk_outreach.config import (
     DEFAULT_DB_PATH,
     DEFAULT_TABLE,
     MEMBER_ID,
@@ -32,11 +35,11 @@ from mh_risk_outreach.models.artifacts import (
     load_scoring_artifact,
 )
 from mh_risk_outreach.models.base import predict_risk_scores
-from mh_risk_outreach.reasons import build_reasons
+from mh_risk_outreach.reasons import build_reasons_and_contributions
 
 # Members explained per SHAP call when reporting progress.
 REASON_CHUNK_SIZE = 100
-CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
+SHAP_CONTRIBUTIONS = "shap_contributions"
 
 
 def safety_review_flags(records: pd.DataFrame) -> np.ndarray:
@@ -66,6 +69,7 @@ def score_members(
     background: pd.DataFrame,
     progress: Callable[[float], None] | None = None,
     chunk_size: int = REASON_CHUNK_SIZE,
+    contributions_for_member: int | None = None,
 ) -> pd.DataFrame:
     """Score ``records`` and return the worklist DataFrame for one model.
 
@@ -79,11 +83,23 @@ def score_members(
     ``band_level_priority``, ``safety_review_required``,
     ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
+    With ``contributions_for_member``, the worklist also carries that member's
+    named, signed SHAP contributions for use in the current scoring run.
     """
     risk_score = predict_risk_scores(artifact.pipeline, records)
     bands = assign_bands(risk_score, artifact.cut_points)
-    reasons = build_reasons(
-        artifact.pipeline, records, background, chunk_size=chunk_size, progress=progress
+    contribution_rows = (
+        np.flatnonzero(records[MEMBER_ID].eq(contributions_for_member).to_numpy())
+        if contributions_for_member is not None
+        else ()
+    )
+    reasons, contributions_by_row = build_reasons_and_contributions(
+        artifact.pipeline,
+        records,
+        background,
+        contribution_rows=contribution_rows,
+        chunk_size=chunk_size,
+        progress=progress,
     )
 
     worklist = pd.DataFrame(
@@ -96,6 +112,10 @@ def score_members(
             "reasoning": reasons,
         }
     )
+    if contributions_for_member is not None:
+        worklist[SHAP_CONTRIBUTIONS] = [
+            contributions_by_row.get(row) for row in range(len(worklist))
+        ]
     return rank_members(worklist)
 
 

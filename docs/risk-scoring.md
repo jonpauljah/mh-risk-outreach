@@ -58,8 +58,8 @@ leaves that published worklist in place and asks for a rerun.
 and the complete survey input snapshot. It evaluates those inputs with the
 worklist's model version and computes the candidate's rank by substituting
 the candidate row in the same cohort. It returns score, band, rank,
-explanation, model, version, and cohort rank context for the issue #32
-persistence API. This calculation leaves the published worklist and
+explanation, model, version, cohort rank context, and the recommendation fields
+for the persistence API. This calculation leaves the published worklist and
 assessment history unchanged. The context records the worklist ID,
 scope, size, calculation times, safety-review status, and ordering policy.
 Refresh the full worklist before ranking with a different operational model
@@ -74,21 +74,88 @@ baseline and the case. The member must already have a published worklist score.
 
 After submitting a reassessment, call
 `mh_risk_outreach.operational.finalize_operational_reassessment` with the latest
-pending assessment ID and any precomputed recommendation metadata. It reruns
-scoring for the full population using the pending inputs for that member's score.
-It then archives the target's score and exact rank context and publishes the
-new cohort in one transaction. The published cohort must match the configured
-operational model and current artifact version before the run. An overlapping
+pending assessment ID. It reruns scoring for the full population and uses the
+pending snapshot for that member's score and recommendation. It archives the
+score, exact rank context, and recommendation and publishes the new cohort in
+one transaction. If supplied, precomputed recommendation fields must match the
+generated values before the transaction can write. The published cohort must
+match the configured operational model and current artifact version before the
+run. An overlapping
 assessment submission, worklist refresh, configured model switch, or artifact
 update can invalidate the run. Scoring or write failures preserve the existing
 assessment history and worklist. Historical assessments and cases retain the
 scores, ranks, and versions recorded when they were created.
 
+## Outreach recommendation rules
+
+The recommendation engine returns `recommendation_action`,
+`recommendation_reason`, and `recommendation_rule_version` from a survey
+snapshot. Either reported self-harm or suicidal thoughts selects **Human-led
+safety review** at every risk band, including when model evidence is unavailable.
+The reason identifies the reported flag or flags.
+
+For routine outreach, a reported value must meet a cutoff in the table. The
+qualifying feature with the largest positive SHAP contribution selects the
+action. The table order resolves ties and applies when the qualifying features
+have no positive evidence. If both behavioral-health triggers qualify with
+equal evidence, sadness supplies the reason. The reason names the selected
+survey factor and its reported value.
+
+| Default tie order | Action | Qualifying reported value |
+| --- | --- | --- |
+| 1 | Behavioral-health resource review | Sadness or anxiety of at least 8 on its 0–10 scale |
+| 2 | Social-support referral | Social support of at most 3 on its 1–10 scale |
+| 3 | Financial/social-services referral | Financial stress of at least 8 on its 1–10 scale |
+| 4 | Workplace-support referral | Work stress of at least 8 on its 1–10 scale |
+| 5 | Lifestyle/wellness support | Nightly sleep of at most 6 hours |
+
+When no rule qualifies, the action is **General wellness check-in**. A missing
+routine measurement supplies no trigger. Action eligibility comes from the
+reported factors in the table. Risk score, band, and history can still inform
+the manager's review. SHAP evidence describes the model's prediction for this
+member. It establishes no causal effect of any factor or intervention. The
+displayed score explanation and the recommendation use the same SHAP calculation.
+
+The default `outreach-rules-v1` settings are in
+[recommendations.py](../src/mh_risk_outreach/recommendations.py). The cutoffs
+and tie order are demonstration assumptions requiring sponsor and domain
+validation for outreach use. To try different thresholds or change the
+`precedence` tuple, pass a `RecommendationRules` value to the operational API
+as `recommendation_rules`. Give changed settings a new version and use the
+same configuration when previewing and finalizing an assessment.
+
+```python
+from dataclasses import replace
+
+from mh_risk_outreach.operational import finalize_operational_reassessment
+from mh_risk_outreach.recommendations import DEFAULT_RECOMMENDATION_RULES
+
+rules = replace(
+    DEFAULT_RECOMMENDATION_RULES,
+    version="outreach-rules-demo-2",
+    social_support_max=4,
+)
+finalize_operational_reassessment(pending_assessment_id, recommendation_rules=rules)
+```
+
+For a first case a manager has chosen to create, use the complete imported
+survey snapshot to generate the score and recommendation. Pass that payload
+to `create_case` so the baseline and case capture the same recommendation.
+For a later case, pass the stored action from the current scored assessment.
+
+```python
+from mh_risk_outreach.db.outreach import create_case
+from mh_risk_outreach.operational import score_operational_member
+
+result = score_operational_member(member_id, imported_inputs)
+create_case(member_id, str(result["recommendation_action"]), scoring=result)
+```
+
 ## Issue #16 historical design
 
 The following sections record the initial implementation and its handoff to
-the comparison page. Issues #34 and #35 cover the operational worklist and
-assessment workflows above.
+the comparison page. Issues #34–#36 cover the operational worklist,
+assessment workflows, and recommendations above.
 
 ## Deliverable
 

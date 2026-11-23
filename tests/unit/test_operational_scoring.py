@@ -2,13 +2,16 @@
 
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import pytest
 from sklearn.cluster import KMeans
 
-from mh_risk_outreach import operational
+from mh_risk_outreach import operational, reasons, scoring
+from mh_risk_outreach.bands import BAND_LABELS
 from mh_risk_outreach.config import (
     DEFAULT_CSV_PATH,
     FEATURES,
@@ -37,7 +40,14 @@ from mh_risk_outreach.operational import (
     refresh_operational_worklist,
     score_operational_member,
 )
+from mh_risk_outreach.recommendations import DEFAULT_RECOMMENDATION_RULES
 from mh_risk_outreach.scoring import run as score_comparison
+
+RECOMMENDATION_FIELDS = (
+    "recommendation_action",
+    "recommendation_reason",
+    "recommendation_rule_version",
+)
 
 
 @pytest.fixture
@@ -101,30 +111,20 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     assert baseline_score["rank_context"]["cohort_id"] == baseline_row["cohort_id"]
     pd.testing.assert_frame_equal(load_operational_scores(db), original)
 
-    case_id = create_case(
-        member,
-        "Contact",
-        db_path=db,
-        recommendation_reason="Baseline reason",
-        recommendation_rule_version="rules-1",
-    )
+    baseline_action = baseline_score["recommendation_action"]
+    case_id = create_case(member, baseline_action, baseline_score, db_path=db)
     baseline_id = get_case(case_id, db)["assessment_id"]
     baseline = get_assessment(baseline_id, db)
     assert baseline["source"] == "baseline"
     assert baseline["inputs"] == inputs
     assert get_current_assessment(member, db)["assessment"] == baseline
     assert_snapshot_matches_worklist(baseline, baseline_row, len(records))
-    assert baseline["rank_context"]["calculated_at"] == baseline_row["calculated_at"]
-    assert (
-        baseline["rank_context"]["ordering"]
-        == baseline_score["rank_context"]["ordering"]
-    )
+    assert baseline["rank_context"] == baseline_score["rank_context"]
     assert datetime.fromisoformat(baseline["scored_at"]) >= datetime.fromisoformat(
         baseline["rank_context"]["calculated_at"]
     )
-    assert baseline["recommendation_action"] == "Contact"
-    assert baseline["recommendation_reason"] == "Baseline reason"
-    assert baseline["recommendation_rule_version"] == "rules-1"
+    for field in RECOMMENDATION_FIELDS:
+        assert baseline[field] == baseline_score[field]
     completed_at = get_case(case_id, db)["created_at"]
     update_case_decision(
         case_id,
@@ -139,10 +139,11 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     )
     original_case = get_case(case_id, db)
     with pytest.raises(ValueError, match="already been used"):
-        create_case(member, "Contact", db_path=db)
+        create_case(member, baseline_action, db_path=db)
     assert original_case["rank_context"] == baseline["rank_context"]
-    assert original_case["recommendation_reason"] == "Baseline reason"
-    assert original_case["recommendation_rule_version"] == "rules-1"
+    assert original_case["recommended_action"] == baseline_action
+    for field in RECOMMENDATION_FIELDS[1:]:
+        assert original_case[field] == baseline_score[field]
 
     pending_id = submit_reassessment(
         member, {"Self_Harm_Thoughts": 1, "Sleep_Trouble": 1}, db
@@ -153,6 +154,8 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     candidate = score_operational_member(member, pending["inputs"], **paths)
     assert candidate["rank_context"]["safety_review_required"] is True
     assert candidate["rank_priority"] < baseline_score["rank_priority"]
+    assert candidate["recommendation_action"] == "Human-led safety review"
+    assert candidate["recommendation_rule_version"] == "outreach-rules-v1"
     assert get_assessment(pending_id, db) == pending
     pd.testing.assert_frame_equal(load_operational_scores(db), original)
 
@@ -171,13 +174,23 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     peer_pending_id = submit_reassessment(peer, {"Self_Harm_Thoughts": 1}, db)
     peer_pending = get_assessment(peer_pending_id, db)
 
-    finalize_operational_reassessment(
-        pending_id,
-        recommendation_action="Contact",
-        recommendation_reason="Reassessment reason",
-        recommendation_rule_version="rules-2",
-        **paths,
-    )
+    before_rejection = load_operational_scores(db)
+    before_history = list_member_history(member, db)
+    matching = {field: candidate[field] for field in RECOMMENDATION_FIELDS}
+    for field, mismatched in zip(
+        RECOMMENDATION_FIELDS,
+        ("General wellness check-in", "Stale reason", "old-v1"),
+        strict=True,
+    ):
+        with pytest.raises(ValueError, match=field):
+            finalize_operational_reassessment(
+                pending_id, **(matching | {field: mismatched}), **paths
+            )
+        assert get_current_assessment(member, db)["assessment"] == pending
+        assert list_member_history(member, db) == before_history
+        pd.testing.assert_frame_equal(load_operational_scores(db), before_rejection)
+
+    finalize_operational_reassessment(pending_id, **matching, **paths)
     finalized = get_assessment(pending_id, db)
     refreshed_worklist = load_operational_scores(db).set_index(MEMBER_ID)
     refreshed = refreshed_worklist.loc[member]
@@ -202,14 +215,14 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     ).any()
     assert_snapshot_matches_worklist(finalized, refreshed, len(records))
     assert finalized["rank_context"]["calculated_at"] == refreshed["calculated_at"]
-    assert finalized["recommendation_action"] == "Contact"
-    assert finalized["recommendation_reason"] == "Reassessment reason"
-    assert finalized["recommendation_rule_version"] == "rules-2"
-    reused_case_id = create_case(member, "Contact", db_path=db)
+    for field in RECOMMENDATION_FIELDS:
+        assert finalized[field] == candidate[field]
+    reused_case_id = create_case(member, candidate["recommendation_action"], db_path=db)
     reused_case = get_case(reused_case_id, db)
     assert reused_case["assessment_id"] == pending_id
-    assert reused_case["recommendation_reason"] == "Reassessment reason"
-    assert reused_case["recommendation_rule_version"] == "rules-2"
+    assert reused_case["recommended_action"] == candidate["recommendation_action"]
+    for field in RECOMMENDATION_FIELDS[1:]:
+        assert reused_case[field] == finalized[field]
     expected_history = {
         "assessments": [baseline, finalized],
         "cases": [original_case, reused_case],
@@ -251,6 +264,107 @@ def assert_snapshot_matches_worklist(snapshot, row, cohort_size):
     assert context["scope"] == OPERATIONAL_SCOPE
     assert context["cohort_size"] == cohort_size
     assert context["safety_review_required"] == bool(row["safety_review_required"])
+
+
+def test_operational_rules_use_the_members_evidence_independently_of_display_text(
+    setup_scoring, monkeypatch
+):
+    paths, records = setup_scoring
+    db = paths["db_path"]
+    published = refresh_operational_worklist(**paths)
+    member = int(published.loc[~published["safety_review_required"], MEMBER_ID].iat[0])
+    member_position = records[MEMBER_ID].tolist().index(member)
+    create_case(member, "Contact", db_path=db)
+    pending_id = submit_reassessment(
+        member,
+        {"Feeling_Sad_Down": 8, "Anxious_Nervous": 0, "Social_Support": 4},
+        db,
+    )
+    inputs = get_assessment(pending_id, db)["inputs"]
+
+    def contributions(_, prepared, *args, **kwargs):
+        signed = pd.DataFrame(0.0, index=prepared.index, columns=prepared.columns)
+        signed["Feeling_Sad_Down"] = 1.0
+        signed["Social_Support"] = -2.0
+        target_position = 0 if len(prepared) == 1 else member_position
+        signed.iloc[target_position, signed.columns.get_loc("Social_Support")] = 2.0
+        return signed.to_numpy()
+
+    monkeypatch.setattr(reasons, "shap_contributions", contributions)
+    rules = replace(
+        DEFAULT_RECOMMENDATION_RULES, version="test-rules-v2", social_support_max=4
+    )
+    default_candidate = score_operational_member(member, inputs, **paths)
+    assert default_candidate["recommendation_action"] == (
+        "Behavioral-health resource review"
+    )
+    candidate = score_operational_member(
+        member, inputs, recommendation_rules=rules, **paths
+    )
+    assert candidate["recommendation_action"] == "Social-support referral"
+    assert candidate["recommendation_rule_version"] == "test-rules-v2"
+
+    monkeypatch.setattr(reasons, "_describe", lambda *_: "different display wording")
+    updated_candidate = score_operational_member(
+        member, inputs, recommendation_rules=rules, **paths
+    )
+    assert updated_candidate["explanation"] == "different display wording"
+    assert candidate["explanation"] != updated_candidate["explanation"]
+    for field in RECOMMENDATION_FIELDS:
+        assert candidate[field] == updated_candidate[field]
+
+    finalize_operational_reassessment(pending_id, recommendation_rules=rules, **paths)
+    finalized = get_assessment(pending_id, db)
+    assert finalized["model_version"] == candidate["model_version"]
+    assert finalized["explanation"] == updated_candidate["explanation"]
+    for field in RECOMMENDATION_FIELDS:
+        assert finalized[field] == candidate[field]
+
+
+def test_candidate_recommendations_across_risk_bands(setup_scoring, monkeypatch):
+    paths, records = setup_scoring
+    refresh_operational_worklist(**paths)
+    artifact = operational.load_scoring_artifact(
+        operational_model_name(), paths["artifacts_dir"]
+    )._replace(cut_points=(20.0, 40.0, 60.0, 80.0))
+    monkeypatch.setattr(operational, "load_scoring_artifact", lambda *_, **__: artifact)
+    risk_score = 0.0
+    monkeypatch.setattr(
+        scoring, "predict_risk_scores", lambda *_: np.array([risk_score])
+    )
+    row = records.iloc[0]
+    member = int(row[MEMBER_ID])
+    inputs = row[FEATURES].to_dict()
+
+    for risk_score, band in zip((10, 30, 50, 70, 90), BAND_LABELS, strict=True):
+        for self_harm, suicidal in ((1, 0), (0, 1), (1, 1)):
+            candidate = score_operational_member(
+                member,
+                inputs
+                | {"Self_Harm_Thoughts": self_harm, "Suicidal_Thoughts": suicidal},
+                **paths,
+            )
+            assert candidate["band_level_priority"] == band
+            assert candidate["recommendation_action"] == "Human-led safety review"
+
+    risk_score = 90
+    candidate = score_operational_member(
+        member,
+        inputs
+        | {
+            "Self_Harm_Thoughts": 0,
+            "Suicidal_Thoughts": 0,
+            "Feeling_Sad_Down": 7,
+            "Anxious_Nervous": 7,
+            "Social_Support": 4,
+            "Financial_Stress": 7,
+            "Work_Stress_Level": 7,
+            "Sleep_Hours_Night": 7,
+        },
+        **paths,
+    )
+    assert candidate["band_level_priority"] == "Very High"
+    assert candidate["recommendation_action"] == "General wellness check-in"
 
 
 @pytest.mark.parametrize("failed_table", ["risk_assessments", "outreach_cases"])
@@ -331,11 +445,13 @@ def test_operational_finalization_rejects_superseded_and_rolls_back(
 
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("DROP TRIGGER fail_finalized_worklist_insert")
+    candidate = score_operational_member(
+        member, pending_state["assessment"]["inputs"], **paths
+    )
     finalize_operational_reassessment(pending_id, **paths)
     finalized = get_assessment(pending_id, db)
-    assert finalized["recommendation_action"] is None
-    assert finalized["recommendation_reason"] is None
-    assert finalized["recommendation_rule_version"] is None
+    for field in RECOMMENDATION_FIELDS:
+        assert finalized[field] == candidate[field]
 
 
 @pytest.mark.parametrize(

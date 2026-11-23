@@ -21,7 +21,7 @@ documentation for details.
 | `member_assessment_state` | Reference to the latest submitted assessment, potentially pending. PR #45 implemented this table. |
 | `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome. PR #45 implemented storage. |
 | Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) connects scoring and assessment persistence for first-case baselines and explicit reassessment finalization. |
-| NBA and eligibility | Planned deterministic action rules, safety routing, capacity, and transactional eligibility checks in [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36)–[#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37). |
+| NBA and eligibility | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) provides versioned recommendations with safety precedence. Safety routing, capacity, and transactional eligibility checks are planned in [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37). |
 | Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides the persistence operations. |
 
 ```mermaid
@@ -69,8 +69,8 @@ flags from model predictors and reevaluated all three models.
 5. The explicit backend scoring operation finalizes the latest pending
    assessment and publishes an updated population worklist in the same
    transaction. The assessment archives the row's score, explanation, band,
-   rank, and cohort and model metadata. An unused scored current assessment
-   with a matching stored recommendation action can supply a later case.
+   rank, cohort and model metadata, and the generated recommendation. An unused
+   scored current assessment with a matching stored action can supply a later case.
    Subsequent refreshes leave those historical snapshots intact.
 
 [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) currently
@@ -81,20 +81,18 @@ the last scored result, and any current safety flags.
 
 ## NBA Recommendation Workflow
 
-For a member without assessment history, planned rules use `patients` inputs and
-structured evidence from operational scoring. For an assessed member they use
-the latest applicable assessment inputs and scoring information, clearly marking
-when current inputs await scoring. Rules produce one actionable recommendation,
-an explanation, and a rule version. Safety concerns take precedence; configurable
-thresholds and tie-breaking require domain validation. Structured model evidence
-can inform rules, but display text is not parsed as an input and SHAP is not
-causal evidence. See [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36).
+Operational preview returns one action, reason, and rule version alongside the
+score. A first-case caller can preview the `patients` snapshot and explicitly
+pass the result into case persistence. Reassessment finalization uses the
+pending snapshot and the same model run for scoring and recommendation. It
+archives the recommendation in the assessment, and later cases copy it from
+their originating assessment.
 
-The intended history preserves recommendation and version alongside assessments
-and cases. A recommendation alone never creates a case. The #45 persistence
-API stores supplied recommendation data when scoring is finalized. Displaying
-and preserving a safety recommendation while scoring is pending remains an
-integration decision.
+The [versioned rules](../risk-scoring.md#outreach-recommendation-rules) give
+safety flags precedence across all bands and use structured SHAP contributions
+to resolve competing routine actions. The demo cutoffs and tie order require
+domain validation. The rules can return safety review with survey inputs alone.
+Displaying a recommendation while scoring is pending is a later UI integration.
 
 ## Outreach Eligibility and Capacity
 
