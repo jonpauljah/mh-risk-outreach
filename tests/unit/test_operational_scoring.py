@@ -253,8 +253,9 @@ def assert_snapshot_matches_worklist(snapshot, row, cohort_size):
     assert context["safety_review_required"] == bool(row["safety_review_required"])
 
 
+@pytest.mark.parametrize("failed_table", ["risk_assessments", "outreach_cases"])
 def test_first_case_requires_published_member_and_rolls_back_on_insert_failure(
-    setup_scoring,
+    setup_scoring, failed_table
 ):
     paths, records = setup_scoring
     db = paths["db_path"]
@@ -265,15 +266,17 @@ def test_first_case_requires_published_member_and_rolls_back_on_insert_failure(
     assert list_member_history(member, db) == {"assessments": [], "cases": []}
 
     refresh_operational_worklist(**paths)
+    original = load_operational_scores(db)
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute(
-            """CREATE TRIGGER fail_case_insert BEFORE INSERT ON outreach_cases
-               BEGIN SELECT RAISE(ABORT, 'injected failure'); END"""
+            f"""CREATE TRIGGER fail_first_case_insert BEFORE INSERT ON {failed_table}
+                BEGIN SELECT RAISE(ABORT, 'injected failure'); END"""
         )
     with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
         create_case(member, "Contact", db_path=db)
     assert get_current_assessment(member, db) is None
     assert list_member_history(member, db) == {"assessments": [], "cases": []}
+    pd.testing.assert_frame_equal(load_operational_scores(db), original)
 
 
 def test_operational_finalization_rejects_superseded_and_rolls_back(

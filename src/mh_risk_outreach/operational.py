@@ -49,11 +49,19 @@ def operational_model_name() -> str:
     return model
 
 
+def _active_artifact_matches(
+    model: str, expected_model: str, expected_version: str, artifacts_dir: str
+) -> bool:
+    return (
+        model == expected_model
+        and artifact_model_version(model, artifacts_dir) == expected_version
+    )
+
+
 def _validate_active_artifact(artifact: ScoringArtifact, artifacts_dir: str) -> None:
     model = operational_model_name()
-    if (
-        model != artifact.model_name
-        or artifact_model_version(model, artifacts_dir) != artifact.model_version
+    if not _active_artifact_matches(
+        model, artifact.model_name, artifact.model_version, artifacts_dir
     ):
         raise ValueError("operational model changed during scoring; run scoring again")
 
@@ -103,9 +111,8 @@ def finalize_operational_reassessment(
             "no operational worklist; run scoring with --operational first"
         )
     model = operational_model_name()
-    if (
-        model != cohort.model_name
-        or artifact_model_version(model, artifacts_dir) != cohort.model_version
+    if not _active_artifact_matches(
+        model, cohort.model_name, cohort.model_version, artifacts_dir
     ):
         raise ValueError(
             "operational model changed; refresh scoring with --operational"
@@ -213,9 +220,8 @@ def score_operational_member(
         raise ValueError("candidate inputs must contain all survey fields")
     cohort = load_operational_scores(db_path)
     version = str(cohort["model_version"].iat[0])
-    if (
-        model != cohort["operational_model_name"].iat[0]
-        or artifact_model_version(model, artifacts_dir) != version
+    if not _active_artifact_matches(
+        model, cohort["operational_model_name"].iat[0], version, artifacts_dir
     ):
         raise ValueError(
             "operational model changed; refresh scoring with --operational"
