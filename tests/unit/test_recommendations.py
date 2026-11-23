@@ -6,6 +6,7 @@ import pytest
 
 from mh_risk_outreach.recommendations import (
     DEFAULT_RECOMMENDATION_RULES,
+    RecommendationRules,
     recommend_action,
 )
 
@@ -177,6 +178,20 @@ def test_thresholds_precedence_and_version_can_be_configured():
     result = recommend_action(inputs, rules=precedence)
     assert result["recommendation_action"] == SOCIAL
     assert result["recommendation_rule_version"] == "social-first-v2"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"social_support_max": 4},
+        {"precedence": (SOCIAL, BEHAVIORAL, FINANCIAL, WORKPLACE, LIFESTYLE)},
+    ],
+)
+def test_changed_policy_requires_a_new_version(changes):
+    with pytest.raises(ValueError, match="outreach-rules-v1 is reserved"):
+        RecommendationRules(**changes)
+    with pytest.raises(ValueError, match="outreach-rules-v1 is reserved"):
+        replace(DEFAULT_RECOMMENDATION_RULES, **changes)
 
 
 @pytest.mark.parametrize(

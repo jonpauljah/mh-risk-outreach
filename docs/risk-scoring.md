@@ -122,7 +122,8 @@ and tie order are demonstration assumptions requiring sponsor and domain
 validation for outreach use. To try different thresholds or change the
 `precedence` tuple, pass a `RecommendationRules` value to the operational API
 as `recommendation_rules`. Give changed settings a new version and use the
-same configuration when previewing and finalizing an assessment.
+same configuration when previewing and finalizing an assessment. The engine
+reserves `outreach-rules-v1` for the shipped cutoffs and tie order.
 
 ```python
 from dataclasses import replace

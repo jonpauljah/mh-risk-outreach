@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from numbers import Integral, Real
 from operator import ge, le
 from typing import NamedTuple, TypedDict
@@ -16,6 +16,7 @@ _FINANCIAL = "Financial/social-services referral"
 _WORKPLACE = "Workplace-support referral"
 _LIFESTYLE = "Lifestyle/wellness support"
 _ROUTINE_ACTIONS = (_BEHAVIORAL, _SOCIAL, _FINANCIAL, _WORKPLACE, _LIFESTYLE)
+_BUILT_IN_RULE_VERSION = "outreach-rules-v1"
 
 
 class _Trigger(NamedTuple):
@@ -35,7 +36,7 @@ class Recommendation(TypedDict):
 class RecommendationRules:
     """Thresholds and tie order for the routine actions."""
 
-    version: str = "outreach-rules-v1"
+    version: str = _BUILT_IN_RULE_VERSION
     feeling_sad_down_min: float = 8
     anxious_nervous_min: float = 8
     social_support_max: float = 3
@@ -65,6 +66,13 @@ class RecommendationRules:
                     raise ValueError(
                         f"{trigger.feature} threshold must be numeric and within {low}–{high}"
                     )
+        if self.version == _BUILT_IN_RULE_VERSION and any(
+            getattr(self, field.name) != field.default for field in fields(self)
+        ):
+            raise ValueError(
+                f"{_BUILT_IN_RULE_VERSION} is reserved for the default thresholds "
+                "and precedence. Use a new version to change them."
+            )
 
     def _triggers(self) -> dict[str, tuple[_Trigger, ...]]:
         return {
