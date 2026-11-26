@@ -5,11 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from threading import Barrier
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from mh_risk_outreach import outreach_policy
+from mh_risk_outreach import operational, outreach_policy
 from mh_risk_outreach.config import (
     DEFAULT_CSV_PATH,
     MEMBER_ID,
@@ -56,11 +57,21 @@ def policy(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(outreach_policy, "artifact_model_version", lambda *args: "v1")
+    monkeypatch.setattr(operational, "artifact_model_version", lambda *args: "v1")
+    monkeypatch.setattr(
+        operational,
+        "load_scoring_artifact",
+        lambda name, *args, version: SimpleNamespace(
+            model_name=name, model_version=version
+        ),
+    )
 
-    def score_member(member_id, inputs, **kwargs):
-        return {**recommend_action(inputs), "rank_context": {"cohort_id": "cohort-1"}}
+    def compute(members, background, artifact):
+        return {
+            row[MEMBER_ID]: recommend_action(row) for row in members.to_dict("records")
+        }
 
-    monkeypatch.setattr(outreach_policy, "score_operational_member", score_member)
+    monkeypatch.setattr(operational, "_compute_baseline_recommendations", compute)
     return OutreachPolicy(2, db_path=path)
 
 
@@ -117,22 +128,63 @@ def test_bulk_selection_rolls_back_earlier_cases_and_baselines_on_insert_failure
     assert policy.worklists().standard_outreach == (first, second)
 
 
+@pytest.mark.parametrize("change", ["model name", "artifact version"])
+def test_bulk_selection_rolls_back_when_model_changes_during_insert(
+    policy, monkeypatch, change
+):
+    selections = policy.worklists().standard_outreach
+    policy.prepare_recommendations(selections)
+    version = "v1"
+
+    def artifact_version(*args):
+        return version
+
+    monkeypatch.setattr(outreach_policy, "artifact_model_version", artifact_version)
+    monkeypatch.setattr(operational, "artifact_model_version", artifact_version)
+
+    inserted = []
+    create_case = outreach_policy._create_case
+
+    def insert_with_model_change(conn, member_id, *args, **kwargs):
+        nonlocal version
+        case_id = create_case(conn, member_id, *args, **kwargs)
+        inserted.append(member_id)
+        if len(inserted) == 1:
+            if change == "model name":
+                monkeypatch.setenv(OPERATIONAL_MODEL_ENV, "xgboost")
+            else:
+                version = "v2"
+        return case_id
+
+    monkeypatch.setattr(outreach_policy, "_create_case", insert_with_model_change)
+
+    with pytest.raises(
+        ValueError, match="operational model changed during case creation"
+    ):
+        policy.create_cases(selections)
+
+    assert inserted == [selection.member_id for selection in selections]
+    with closing(sqlite3.connect(policy.db_path)) as conn:
+        for table in ("outreach_cases", "risk_assessments", "member_assessment_state"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
 def test_bulk_selection_rechecks_every_candidate_after_recommendation(
     policy, monkeypatch
 ):
     first, second = policy.worklists().standard_outreach
-    original = outreach_policy.score_operational_member
+    original = outreach_policy.recommend_operational_baselines
 
-    def preview(member_id, inputs, **kwargs):
-        if member_id == second.member_id:
+    def preview(member_ids, cohort_id, **kwargs):
+        if second.member_id in member_ids:
             with closing(sqlite3.connect(policy.db_path)) as conn, conn:
                 conn.execute(
                     "UPDATE operational_scores SET band_level_priority='Medium' WHERE Member_ID=?",
-                    (member_id,),
+                    (second.member_id,),
                 )
-        return original(member_id, inputs, **kwargs)
+        return original(member_ids, cohort_id, **kwargs)
 
-    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    monkeypatch.setattr(outreach_policy, "recommend_operational_baselines", preview)
     with pytest.raises(ValueError, match="no longer eligible"):
         policy.create_cases([first, second])
     assert list_active_cases(policy.db_path) == []
@@ -148,14 +200,14 @@ def test_bulk_selection_rechecks_shared_capacity_after_recommendation(
     worklists = policy.worklists()
     first, second = worklists.standard_outreach
     (safety,) = worklists.safety_review
-    original = outreach_policy.score_operational_member
+    original = outreach_policy.recommend_operational_baselines
 
-    def preview(member_id, inputs, **kwargs):
-        if member_id == second.member_id:
+    def preview(member_ids, cohort_id, **kwargs):
+        if second.member_id in member_ids:
             policy.create_case(safety)
-        return original(member_id, inputs, **kwargs)
+        return original(member_ids, cohort_id, **kwargs)
 
-    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    monkeypatch.setattr(outreach_policy, "recommend_operational_baselines", preview)
     with pytest.raises(ValueError, match="at capacity"):
         policy.create_cases([first, second])
     assert [case["Member_ID"] for case in list_active_cases(policy.db_path)] == [
@@ -288,15 +340,14 @@ def test_concurrent_selections_cannot_exceed_capacity_or_duplicate(
         second = first
     ready = Barrier(3, timeout=10)
     release = Barrier(3, timeout=10)
-    original = outreach_policy.score_operational_member
+    original = outreach_policy.recommend_operational_baselines
 
-    def preview(member_id, inputs, **kwargs):
-        if member_id != 7:
-            ready.wait()
-            release.wait()
-        return original(member_id, inputs, **kwargs)
+    def preview(member_ids, cohort_id, **kwargs):
+        ready.wait()
+        release.wait()
+        return original(member_ids, cohort_id, **kwargs)
 
-    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    monkeypatch.setattr(outreach_policy, "recommend_operational_baselines", preview)
 
     def create(selection):
         try:
@@ -330,15 +381,15 @@ def test_cohort_refresh_during_recommendation_rejects_stale_selection(
     policy, monkeypatch
 ):
     selection = policy.worklists().standard_outreach[0]
-    original = outreach_policy.score_operational_member
+    original = outreach_policy.recommend_operational_baselines
 
-    def preview(member_id, inputs, **kwargs):
-        result = original(member_id, inputs, **kwargs)
+    def preview(member_ids, cohort_id, **kwargs):
+        result = original(member_ids, cohort_id, **kwargs)
         with closing(sqlite3.connect(policy.db_path)) as conn, conn:
             conn.execute("UPDATE operational_scores SET cohort_id = 'cohort-2'")
         return result
 
-    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    monkeypatch.setattr(outreach_policy, "recommend_operational_baselines", preview)
     with pytest.raises(ValueError, match="no longer eligible"):
         policy.create_case(selection)
     assert list_member_history(13, policy.db_path) == {"cases": [], "assessments": []}

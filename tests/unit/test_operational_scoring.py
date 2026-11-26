@@ -207,13 +207,22 @@ def test_legacy_worklist_recovery_preserves_history_and_live_safety(setup_scorin
     assert list_member_history(outside_member, db) == legacy_history
 
 
-def test_policy_uses_published_scores_and_finalized_recommendations(setup_scoring):
+def test_policy_uses_published_scores_and_finalized_recommendations(
+    setup_scoring, monkeypatch
+):
     paths, records = setup_scoring
     db = paths["db_path"]
     policy = OutreachPolicy(1, **paths)
     published = refresh_operational_worklist(**paths)
     (selected,) = policy.worklists().standard_outreach
-    case_id = policy.create_case(selected)
+    assert selected.recommendation_action is not None
+
+    def reject_model_load(*args, **kwargs):
+        pytest.fail("case creation should use the recommendation saved at publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(operational, "load_scoring_artifact", reject_model_load)
+        case_id = policy.create_case(selected)
     baseline_case = get_case(case_id, db)
     row = published.loc[published[MEMBER_ID].eq(selected.member_id)].iloc[0]
     inputs = records.loc[records[MEMBER_ID].eq(selected.member_id), FEATURES]
@@ -225,6 +234,8 @@ def test_policy_uses_published_scores_and_finalized_recommendations(setup_scorin
     assert baseline_case["band_level_priority"] == row["band_level_priority"]
     assert baseline_case["recommended_action"] == preview["recommendation_action"]
     assert baseline_case["recommendation_reason"] == preview["recommendation_reason"]
+    assert baseline_case["recommended_action"] == selected.recommendation_action
+    assert baseline_case["recommendation_reason"] == selected.recommendation_reason
 
     assessment_id = submit_reassessment(
         selected.member_id, {"Suicidal_Thoughts": 1}, db

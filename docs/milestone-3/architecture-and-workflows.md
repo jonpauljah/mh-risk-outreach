@@ -12,8 +12,8 @@ training, band fitting, and the SHAP background. The 2,000 held-out IDs define
 the evaluation and operational populations. Model evaluation reads original
 survey inputs and operational scoring can use updated assessment snapshots.
 Comparison scoring writes replaceable `<model>_scores` tables and operational
-scoring writes a separate `operational_scores` worklist. Streamlit currently
-displays member records, model evaluation, and risk scoring. See the existing
+scoring writes a separate `operational_scores` worklist. Streamlit displays
+member records, model evaluation, risk scoring, and Outreach Management. See the
 [database](../milestone-1/database.md) and [risk-scoring](../risk-scoring.md)
 documentation for details.
 
@@ -25,7 +25,7 @@ documentation for details.
 | `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome. PR #45 implemented storage. |
 | Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) connects scoring and assessment persistence for first-case baselines and explicit reassessment finalization. |
 | NBA and eligibility | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) provides versioned recommendations with safety precedence. [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) supplies safety routing, worklists, and transactional eligibility checks. |
-| Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides the persistence operations. |
+| Case lifecycle and UI | [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38) provides the lifecycle service. [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) adds the worklists and case creation UI. |
 
 ```mermaid
 flowchart LR
@@ -94,8 +94,8 @@ the last scored result, and any current safety flags.
 ## NBA Recommendation Workflow
 
 Operational preview returns one action, reason, and rule version alongside the
-score. For a first case, the manager policy generates the recommendation from
-the saved `patients` snapshot. Reassessment finalization uses the pending
+score. Operational scoring prepares first-case recommendations from the
+saved `patients` snapshot. Reassessment finalization uses the pending
 snapshot and the same model run for scoring and recommendation. It archives
 the recommendation in the assessment, and later cases copy it from their
 originating assessment.
@@ -104,13 +104,15 @@ The [versioned rules](../risk-scoring.md#outreach-recommendation-rules) give
 safety flags precedence across all bands and use structured SHAP contributions
 to resolve competing routine actions. The demo cutoffs and tie order require
 domain validation. The rules can return safety review with survey inputs alone.
-Displaying a recommendation while scoring is pending is a later UI integration.
+Safety Review shows that recommendation while the current assessment awaits scoring.
 
 ## Outreach Eligibility and Capacity
 
-Configure one shared `OutreachPolicy(capacity=K)` for the database.
+Configure one shared `OutreachPolicy(capacity=K)` for the database. The Streamlit
+page reads `MH_RISK_OUTREACH_CAPACITY` at launch and defaults to 100.
 `worklists()` returns **Safety Review**, **Standard Outreach**, and the
-remaining standard slots. Both queues start with the held-out IDs. Safety
+remaining standard slots. The Streamlit page reads these and the Active Cases
+table in one SQLite transaction. Both queues start with the held-out IDs. Safety
 Review reads flags directly from the latest saved inputs and can surface an
 in-scope concern before a published score is available. A case linked to
 those inputs removes that snapshot from the queue. A newer flagged snapshot
@@ -134,9 +136,13 @@ standard cases fit within the available slots at validation time. Selected
 safety cases can take the total above K. `create_case(selection)` uses the
 same checks for a single case.
 
-For a first case, the service generates the recommendation from the imported
-inputs and saves a baseline from the published score. Later cases reuse the
-recommendation on the finalized assessment. Completing a case frees a slot.
+Operational scoring publishes first-case recommendations alongside the scores
+in `operational_recommendations`. Older publications fill and save missing
+recommendations as needed. The worklist keeps members with a saved
+recommendation selectable if another member's recommendation is unavailable.
+Case creation reuses the published score and recommendation to save the
+first-case baseline. Later cases reuse the recommendation on the finalized
+assessment. Completing a case frees a slot.
 Repeat standard outreach requires a newer qualifying manual assessment and
 continued eligibility. Read-only demo previews leave eligibility unchanged.
 The manager-selected flow requires the sponsor approval noted in #37.
@@ -182,15 +188,16 @@ and case completion are independent operations.
 
 ## Streamlit Workflows
 
-All outreach components below are planned; existing model evaluation and risk
-scoring pages remain separate.
+Outreach Management is available alongside model evaluation and risk scoring.
+Use the [getting-started guide](../../getting-started.md) to publish operational
+scores and start the app.
 
-| View | Intended workflow |
+| View | Workflow |
 | --- | --- |
-| Safety Review / Standard Outreach | Show current context, recommendations, capacity, and errors; managers select cases to create. |
-| Active Cases | List Pending and Accepted cases; review the original action, accept or justify an override, record an outcome, and complete manually. |
-| Manual reassessment | Edit validated inputs deliberately; named synthetic presets populate the form without submitting or changing eligibility. Show pending status and before/after context. |
-| History & Reporting | Read-only overview, searchable completed cases, and exact member ID lookup with assessment and case comparisons; show when no reassessment or score exists. |
+| Safety Review / Standard Outreach | Review current context, recommendations, and shared capacity. Submit the selected members in a single batch from either worklist. |
+| Active Cases | List Pending and Accepted cases. **Update Case** opens the selected case's details. [#40](https://github.com/jonpauljah/mh-risk-outreach/issues/40) adds the lifecycle controls. |
+| Manual reassessment | [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) adds validated edits, demo presets, pending status, and before/after context. |
+| History & Reporting | [#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42) adds a read-only overview, completed case search, and member assessment comparisons. |
 
 ## Testing and Integration
 
