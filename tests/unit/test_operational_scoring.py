@@ -234,9 +234,9 @@ def test_policy_uses_published_scores_and_finalized_recommendations(setup_scorin
     )
     assert pending.pending_scoring and not pending.selectable
     finalize_operational_reassessment(assessment_id, **paths)
-    accept_case(case_id, db)
+    accept_case(case_id, db, expected_action=baseline_case["recommended_action"])
     record_case_outcome(case_id, "Reached — engaged", db)
-    complete_case(case_id, db)
+    complete_case(case_id, db, expected_outcome="Reached — engaged")
     no_standard_slots = replace(policy, capacity=0)
     concern = next(
         c
@@ -302,9 +302,9 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     )
     for field in RECOMMENDATION_FIELDS:
         assert baseline[field] == baseline_score[field]
-    accept_case(case_id, db)
+    accept_case(case_id, db, expected_action=baseline_action)
     record_case_outcome(case_id, "Reached — engaged", db)
-    complete_case(case_id, db)
+    complete_case(case_id, db, expected_outcome="Reached — engaged")
     original_case = get_case(case_id, db)
     with pytest.raises(ValueError, match="already been used"):
         create_case(member, baseline_action, db_path=db)

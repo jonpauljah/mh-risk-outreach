@@ -256,8 +256,14 @@ def select_case_action(
         )
 
 
-def accept_case(case_id: int, db_path: str | Path = DEFAULT_DB_PATH) -> None:
-    """Accept the Pending case's selected action, defaulting to its recommendation."""
+def accept_case(
+    case_id: int,
+    db_path: str | Path = DEFAULT_DB_PATH,
+    *,
+    expected_action: str,
+    expected_justification: str | None = None,
+) -> None:
+    """Accept the action and justification the manager reviewed while Pending."""
     with _case_for_decision(case_id, "Pending", db_path) as (conn, case):
         recommended = case["recommended_action"]
         action = (
@@ -265,10 +271,16 @@ def accept_case(case_id: int, db_path: str | Path = DEFAULT_DB_PATH) -> None:
             if case["selected_action"] is not None
             else recommended
         )
-        reason = _override_reason(action, recommended, case["override_justification"])
+        justification = case["override_justification"]
+        if (action, justification) != (expected_action, expected_justification):
+            raise ValueError(
+                "case action or justification changed; refresh and review it again"
+            )
+        reason = _override_reason(action, recommended, justification)
         conn.execute(
             """UPDATE outreach_cases SET status='Accepted', selected_action=?,
-               accepted_action=?, override_justification=?, accepted_at=? WHERE case_id=?""",
+               accepted_action=?, override_justification=?, accepted_at=?,
+               outcome=NULL, outcome_recorded_at=NULL WHERE case_id=?""",
             (action, action, reason, _now(), case_id),
         )
 
@@ -286,11 +298,15 @@ def record_case_outcome(
         )
 
 
-def complete_case(case_id: int, db_path: str | Path = DEFAULT_DB_PATH) -> None:
-    """Complete an Accepted case after an outcome has been recorded."""
+def complete_case(
+    case_id: int, db_path: str | Path = DEFAULT_DB_PATH, *, expected_outcome: str | None
+) -> None:
+    """Complete an Accepted case with the recorded outcome the manager reviewed."""
     with _case_for_decision(case_id, "Accepted", db_path) as (conn, case):
         if case["outcome"] is None or case["outcome_recorded_at"] is None:
             raise ValueError("record an outcome before completing the case")
+        if case["outcome"] != expected_outcome:
+            raise ValueError("case outcome changed; refresh and review it again")
         conn.execute(
             "UPDATE outreach_cases SET status='Completed', completed_at=? WHERE case_id=?",
             (_now(), case_id),

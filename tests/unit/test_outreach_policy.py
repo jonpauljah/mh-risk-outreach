@@ -65,9 +65,10 @@ def policy(tmp_path, monkeypatch):
 
 
 def complete(case_id, db_path):
-    accept_case(case_id, db_path)
+    case = get_case(case_id, db_path)
+    accept_case(case_id, db_path, expected_action=case["recommended_action"])
     record_case_outcome(case_id, "Reached — engaged", db_path)
-    complete_case(case_id, db_path)
+    complete_case(case_id, db_path, expected_outcome="Reached — engaged")
 
 
 def test_bulk_selection_creates_only_selected_cases_and_honors_safety_exception(policy):
@@ -176,7 +177,10 @@ def test_worklists_and_safety_exception_use_shared_capacity(policy):
 
     standard_id = policy.create_case(first.standard_outreach[0])
     assert [c.member_id for c in policy.worklists().standard_outreach] == [16]
-    accept_case(standard_id, policy.db_path)
+    standard = get_case(standard_id, policy.db_path)
+    accept_case(
+        standard_id, policy.db_path, expected_action=standard["recommended_action"]
+    )
     other_id = policy.create_case(first.standard_outreach[1])
     with pytest.raises(ValueError, match="at capacity"):
         policy.create_case(first.standard_outreach[1])

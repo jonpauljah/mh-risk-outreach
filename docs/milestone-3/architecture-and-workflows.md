@@ -158,16 +158,23 @@ stateDiagram-v2
 
 In `mh_risk_outreach.db.outreach`, `select_case_action()` saves a choice while
 the case is Pending. An alternative requires a nonblank justification.
-`accept_case()` saves the selected action or defaults to the recommendation.
+Pass the action and justification shown during review as `expected_action`
+and `expected_justification` to `accept_case()`. If no action has been selected,
+the action for review is the original recommendation. Acceptance compares
+both values under the write lock and clears any outcome left on a Pending
+case by an older version.
 The original assessment link, recommendation, explanation, rule version, and
 model version stay available for comparison.
 
 `record_case_outcome()` saves one outcome while Accepted. The manager can
 correct it before completion. Supported values are **Not reached**,
 **Reached — declined**, **Reached — engaged**, and **Referral completed**.
-`complete_case()` requires a saved outcome and freezes that outcome and the
-other case decisions. SQLite stores UTC timestamps for acceptance, outcome
-recording, and completion. Invalid decisions leave the stored case unchanged.
+Pass the outcome shown during review as `expected_outcome` to `complete_case()`.
+Completion checks it against the saved outcome under the write lock and freezes
+the case decisions. If a reviewed value has changed, refresh the case and
+review it again before submitting. SQLite stores UTC timestamps for acceptance,
+outcome recording, and completion. Invalid decisions leave the stored case
+unchanged.
 
 `list_active_cases()` returns Pending and Accepted cases. `list_member_history()`
 includes Completed cases after their capacity slots are released. Reassessment
