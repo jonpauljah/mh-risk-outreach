@@ -17,6 +17,10 @@ planned outcomes, not completed application behavior.
 ## Objectives and Scope
 
 - Preserve the approved imported dataset and stable member identities.
+- Train models, fit risk bands, and build the SHAP background from 8,000
+  original training members. Use the same 2,000 held-out IDs for evaluation
+  and for all operational scoring, recommendations, reassessments, and
+  outreach. Keep all 10,000 imported members in SQLite.
 - Select one operational model using the three-model evaluation; assign stable,
   model-derived risk bands and separate safety review from model predictions.
 - Keep on-demand assessment history and support explicit manual reassessment.
@@ -59,10 +63,10 @@ implementation guide.
 | [#31](https://github.com/jonpauljah/mh-risk-outreach/issues/31) | Protect initial import and member identity | Existing ETL | **Merged:** [PR #44](https://github.com/jonpauljah/mh-risk-outreach/pull/44) skips reimports into populated `patients`. |
 | [#32](https://github.com/jonpauljah/mh-risk-outreach/issues/32) | Assessment and case persistence | Coordinate #31 | **Merged:** [PR #45](https://github.com/jonpauljah/mh-risk-outreach/pull/45) implements assessment and case storage operations. |
 | [#33](https://github.com/jonpauljah/mh-risk-outreach/issues/33) | Exclude safety flags and reevaluate three models | Existing ML pipeline | **Merged:** [PR #46](https://github.com/jonpauljah/mh-risk-outreach/pull/46) removes safety flags from model predictors and reevaluates all three models. |
-| [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) | Operational model and stable bands | #33, #32 | Operational scoring and versioned bands implemented in [PR #47](https://github.com/jonpauljah/mh-risk-outreach/pull/47). |
-| [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) | Current and historical assessments | #32, #34 | Backend integration implemented for first-case baselines and explicit reassessment finalization. |
-| [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) | Deterministic NBA rules | #33–#35 | [Versioned rules](../risk-scoring.md#outreach-recommendation-rules) are integrated with operational assessment scoring. |
-| [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | Planned. |
+| [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) | Operational model and stable bands | #33, #32 | [PR #47](https://github.com/jonpauljah/mh-risk-outreach/pull/47) adds versioned bands and operational scoring. The corrected scope is the 2,000 held-out members. |
+| [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) | Current and historical assessments | #32, #34 | [PR #48](https://github.com/jonpauljah/mh-risk-outreach/pull/48) integrates first-case baselines and explicit reassessment finalization. The fixed 2,000-member holdout supersedes the earlier population scope in #35. |
+| [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) | Deterministic NBA rules | #33–#35 | [PR #50](https://github.com/jonpauljah/mh-risk-outreach/pull/50) integrates [versioned rules](../risk-scoring.md#outreach-recommendation-rules) with operational assessment scoring. |
+| [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | [PR #51](https://github.com/jonpauljah/mh-risk-outreach/pull/51) implements both worklists, configurable shared capacity K, and transactional creation checks. |
 | [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38) | Case lifecycle | #32, #37; #35, #36 | Lifecycle policy is planned. Case storage primitives are available from #32. |
 | [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) | Worklists and case creation UI | #37, #38 | Planned. |
 | [#40](https://github.com/jonpauljah/mh-risk-outreach/issues/40) | Active case management UI | #38, #39 | Planned. |
@@ -71,8 +75,8 @@ implementation guide.
 
 ## Remaining Work and Implementation Order
 
-1. Build eligibility and capacity policy (#37), then enforce the case lifecycle
-   and transactional creation (#38). The manager-driven creation flow differs
+1. Apply the eligibility and capacity policy to the case lifecycle (#38).
+   The manager-driven creation flow differs
    from client contract wording and requires sponsor approval, as #37 notes.
 2. Integrate worklists (#39), case management (#40), and deliberate manual
    reassessment (#41) in Streamlit. Add read-only reporting (#42) after case and

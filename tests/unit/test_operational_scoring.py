@@ -1,5 +1,6 @@
 """Exercise operational scoring with the SQLite assessment contract."""
 
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -19,19 +20,24 @@ from mh_risk_outreach.config import (
     OPERATIONAL_MODEL_ENV,
     TARGET,
 )
+from mh_risk_outreach.datasets import split_dataset
 from mh_risk_outreach.db.assessments import (
+    finalize_scoring,
     get_assessment,
     get_current_assessment,
     submit_reassessment,
 )
-from mh_risk_outreach.db.operational_scores import load_operational_scores
+from mh_risk_outreach.db.operational_scores import (
+    audit_operational_population,
+    load_operational_scores,
+)
 from mh_risk_outreach.db.outreach import (
     create_case,
     get_case,
     list_member_history,
     update_case_decision,
 )
-from mh_risk_outreach.db.repository import save_records
+from mh_risk_outreach.db.repository import load_from_db, save_records
 from mh_risk_outreach.models.train import run as train
 from mh_risk_outreach.operational import (
     OPERATIONAL_SCOPE,
@@ -40,7 +46,11 @@ from mh_risk_outreach.operational import (
     refresh_operational_worklist,
     score_operational_member,
 )
-from mh_risk_outreach.recommendations import DEFAULT_RECOMMENDATION_RULES
+from mh_risk_outreach.outreach_policy import OutreachPolicy
+from mh_risk_outreach.recommendations import (
+    DEFAULT_RECOMMENDATION_RULES,
+    SAFETY_REVIEW_ACTION,
+)
 from mh_risk_outreach.scoring import run as score_comparison
 
 RECOMMENDATION_FIELDS = (
@@ -66,7 +76,7 @@ def setup_scoring(tmp_path, monkeypatch):
     }
     save_records(records, paths["db_path"])
     train(**paths)
-    return paths, records
+    return paths, split_dataset(records).evaluation.sort_values(MEMBER_ID)
 
 
 def test_configuration(monkeypatch):
@@ -79,13 +89,186 @@ def test_configuration(monkeypatch):
         operational_model_name()
 
 
+def test_training_members_cannot_start_operational_history(setup_scoring):
+    paths, held_out = setup_scoring
+    db = paths["db_path"]
+    training = split_dataset(load_from_db(db)).train.iloc[0]
+    member = int(training[MEMBER_ID])
+    refresh_operational_worklist(**paths)
+    preview = score_operational_member(
+        int(held_out[MEMBER_ID].iat[0]), held_out.iloc[0][FEATURES].to_dict(), **paths
+    )
+
+    with pytest.raises(ValueError, match="outside the operational population"):
+        score_operational_member(member, training[FEATURES].to_dict(), **paths)
+    with pytest.raises(ValueError, match="outside the operational population"):
+        submit_reassessment(member, {"Suicidal_Thoughts": 1}, db)
+    with pytest.raises(ValueError, match="outside the operational population"):
+        create_case(member, str(preview["recommendation_action"]), preview, db)
+    assert list_member_history(member, db) == {"assessments": [], "cases": []}
+
+
+def test_legacy_worklist_recovery_preserves_history_and_live_safety(setup_scoring):
+    paths, held_out = setup_scoring
+    db = paths["db_path"]
+    split = split_dataset(load_from_db(db))
+    training = split.train.loc[split.train["Self_Harm_Thoughts"].eq(1)].iloc[0]
+    outside_member = int(training[MEMBER_ID])
+    model = operational_model_name()
+    published = refresh_operational_worklist(**paths)
+    version = published["model_version"].iat[0]
+    member = int(published.loc[~published["safety_review_required"], MEMBER_ID].iat[0])
+    inputs = held_out.set_index(MEMBER_ID).loc[member, FEATURES].to_dict()
+    create_case(member, "Contact", db_path=db)
+    pending = submit_reassessment(member, {"Suicidal_Thoughts": 1}, db)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("DELETE FROM operational_scores")
+        conn.execute(
+            """INSERT INTO operational_scores
+               SELECT Member_ID, ?, ?, 75, 'High', ROW_NUMBER() OVER (ORDER BY Member_ID),
+                      'Legacy evidence', 0, NULL, NULL, 0, 'legacy', '2026-11-16'
+               FROM patients""",
+            (model, version),
+        )
+        legacy_baseline = conn.execute(
+            """INSERT INTO risk_assessments
+               (Member_ID, source, created_at, inputs_json, scoring_status, risk_score,
+                band_level_priority, rank_priority, rank_context_json, explanation,
+                recommendation_action, operational_model_name, model_version, scored_at)
+               VALUES (?, 'baseline', '2026-11-16', ?, 'Scored', 75,
+                       'High', 1, '{"scope":"all_imported_members"}', 'Legacy evidence',
+                       'Contact', ?, ?, '2026-11-16')""",
+            (outside_member, json.dumps(training[FEATURES].to_dict()), model, version),
+        ).lastrowid
+        legacy_pending = conn.execute(
+            """INSERT INTO risk_assessments
+               (Member_ID, source, created_at, inputs_json, scoring_status)
+               VALUES (?, 'reassessment', '2026-11-16', ?, 'PendingScoring')""",
+            (outside_member, json.dumps(training[FEATURES].to_dict())),
+        ).lastrowid
+        legacy_case = conn.execute(
+            """INSERT INTO outreach_cases
+               (Member_ID, assessment_id, status, recommended_action, created_at)
+               VALUES (?, ?, 'Pending', 'Contact', '2026-11-16')""",
+            (outside_member, legacy_baseline),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO member_assessment_state VALUES (?, ?, '2026-11-16')",
+            (outside_member, legacy_pending),
+        )
+
+    policy = OutreachPolicy(3, **paths)
+    legacy_history = list_member_history(outside_member, db)
+    held_out_history = list_member_history(member, db)
+    audit = audit_operational_population(db)
+    assert audit.published_count == len(split.train) + len(held_out)
+    assert audit.requires_refresh
+    assert audit.excluded_assessments == [
+        (outside_member, legacy_baseline, "Scored"),
+        (outside_member, legacy_pending, "PendingScoring"),
+    ]
+    assert audit.excluded_cases == [(outside_member, legacy_case, "Pending")]
+    worklists = policy.worklists()
+    assert worklists.requires_score_refresh
+    assert worklists.standard_slots == 1  # Both existing active cases consume K.
+    assert worklists.standard_outreach == ()
+    assert outside_member not in {c.member_id for c in worklists.safety_review}
+    concern = next(c for c in worklists.safety_review if c.member_id == member)
+    assert concern.pending_scoring and not concern.selectable
+    assert concern.cohort_id is None
+    other_member = int(held_out.loc[held_out[MEMBER_ID].ne(member), MEMBER_ID].iat[0])
+    for operation in (
+        lambda: load_operational_scores(db),
+        lambda: score_operational_member(member, inputs, **paths),
+        lambda: finalize_operational_reassessment(pending, **paths),
+        lambda: create_case(other_member, "Contact", db_path=db),
+    ):
+        with pytest.raises(ValueError, match="refresh scoring"):
+            operation()
+    with pytest.raises(ValueError, match="outside the operational population"):
+        score_operational_member(outside_member, training[FEATURES].to_dict(), **paths)
+
+    recovered = refresh_operational_worklist(**paths)
+    assert set(recovered[MEMBER_ID]) == set(held_out[MEMBER_ID])
+    assert not policy.worklists().requires_score_refresh
+    assert list_member_history(outside_member, db) == legacy_history
+    assert list_member_history(member, db) == held_out_history
+    with pytest.raises(ValueError, match="current pending reassessment"):
+        finalize_operational_reassessment(legacy_pending, **paths)
+    with pytest.raises(ValueError, match="outside the operational population"):
+        submit_reassessment(outside_member, {}, db)
+    with pytest.raises(ValueError, match="outside the operational population"):
+        create_case(outside_member, "Contact", db_path=db)
+    preview = score_operational_member(member, inputs, **paths)
+    with pytest.raises(ValueError, match="outside the operational population"):
+        finalize_scoring(legacy_pending, preview, db)
+    assert list_member_history(outside_member, db) == legacy_history
+
+
+def test_policy_uses_published_scores_and_finalized_recommendations(setup_scoring):
+    paths, records = setup_scoring
+    db = paths["db_path"]
+    policy = OutreachPolicy(1, **paths)
+    published = refresh_operational_worklist(**paths)
+    (selected,) = policy.worklists().standard_outreach
+    case_id = policy.create_case(selected)
+    baseline_case = get_case(case_id, db)
+    row = published.loc[published[MEMBER_ID].eq(selected.member_id)].iloc[0]
+    inputs = records.loc[records[MEMBER_ID].eq(selected.member_id), FEATURES]
+    preview = score_operational_member(
+        selected.member_id, inputs.iloc[0].to_dict(), **paths
+    )
+    assert baseline_case["risk_score"] == row["risk_score"]
+    assert baseline_case["model_version"] == row["model_version"]
+    assert baseline_case["band_level_priority"] == row["band_level_priority"]
+    assert baseline_case["recommended_action"] == preview["recommendation_action"]
+    assert baseline_case["recommendation_reason"] == preview["recommendation_reason"]
+
+    assessment_id = submit_reassessment(
+        selected.member_id, {"Suicidal_Thoughts": 1}, db
+    )
+    pending = next(
+        c for c in policy.worklists().safety_review if c.member_id == selected.member_id
+    )
+    assert pending.pending_scoring and not pending.selectable
+    finalize_operational_reassessment(assessment_id, **paths)
+    update_case_decision(
+        case_id,
+        {
+            "status": "Completed",
+            "accepted_at": "2026-11-16T11:15:00+00:00",
+            "outcome": "Reached — engaged",
+            "outcome_recorded_at": "2026-11-16T11:30:00+00:00",
+            "completed_at": "2026-11-16T12:00:00+00:00",
+        },
+        db,
+    )
+    no_standard_slots = replace(policy, capacity=0)
+    concern = next(
+        c
+        for c in no_standard_slots.worklists().safety_review
+        if c.member_id == selected.member_id
+    )
+    assert concern.selectable
+    flagged_case = get_case(no_standard_slots.create_case(concern), db)
+    saved_assessment = get_assessment(assessment_id, db)
+    assert flagged_case["assessment_id"] == assessment_id
+    assert flagged_case["recommended_action"] == SAFETY_REVIEW_ACTION
+    assert (
+        flagged_case["band_level_priority"] == saved_assessment["band_level_priority"]
+    )
+
+
 def test_candidate_is_read_only_and_snapshots_survive_refresh(
     setup_scoring, monkeypatch
 ):
     paths, records = setup_scoring
     db = paths["db_path"]
+    original_split = split_dataset(load_from_db(db))
     published = refresh_operational_worklist(**paths)
     assert len(published) == len(records)
+    assert set(published[MEMBER_ID]) == set(original_split.evaluation[MEMBER_ID])
+    assert set(published[MEMBER_ID]).isdisjoint(original_split.train[MEMBER_ID])
     assert published["operational_model_name"].eq("logistic_regression").all()
     assert published["rank_priority"].tolist() == list(range(1, len(records) + 1))
     with closing(sqlite3.connect(db)) as conn:
@@ -214,6 +397,7 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
         != original.set_index(MEMBER_ID)["rank_priority"].drop(member).sort_index()
     ).any()
     assert_snapshot_matches_worklist(finalized, refreshed, len(records))
+    assert set(refreshed_worklist.index) == set(published[MEMBER_ID])
     assert finalized["rank_context"]["calculated_at"] == refreshed["calculated_at"]
     for field in RECOMMENDATION_FIELDS:
         assert finalized[field] == candidate[field]
@@ -242,10 +426,14 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     monkeypatch.setenv(OPERATIONAL_MODEL_ENV, "xgboost")
     switched = refresh_operational_worklist(**paths)
     assert switched["operational_model_name"].eq("xgboost").all()
+    assert set(switched[MEMBER_ID]) == set(published[MEMBER_ID])
     assert list_member_history(member, db) == expected_history
     with closing(sqlite3.connect(db)) as conn:
         imported = pd.read_sql_query("SELECT * FROM patients", conn)
     assert imported.set_index(MEMBER_ID).loc[member, FEATURES].to_dict() == inputs
+    pd.testing.assert_frame_equal(
+        split_dataset(imported).evaluation, original_split.evaluation
+    )
 
 
 def assert_snapshot_matches_worklist(snapshot, row, cohort_size):

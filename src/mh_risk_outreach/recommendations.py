@@ -10,6 +10,8 @@ from typing import NamedTuple, TypedDict
 from mh_risk_outreach.config import CRITICAL_INDICATORS
 from mh_risk_outreach.prepare import SCALED_RANGES
 
+SAFETY_REVIEW_ACTION = "Human-led safety review"
+
 _BEHAVIORAL = "Behavioral-health resource review"
 _SOCIAL = "Social-support referral"
 _FINANCIAL = "Financial/social-services referral"
@@ -159,7 +161,7 @@ def recommend_action(
             reported_flags.append(f"{label} (1)")
     if reported_flags:
         return {
-            "recommendation_action": "Human-led safety review",
+            "recommendation_action": SAFETY_REVIEW_ACTION,
             "recommendation_reason": f"Reported {' and '.join(reported_flags)}.",
             "recommendation_rule_version": rules.version,
         }

@@ -65,9 +65,13 @@ def database(tmp_path):
     columns = ",".join(
         f'"{name}"' for name in ["Member_ID", *FEATURES, "Has_Mental_Health_Issue"]
     )
-    conn.execute(
+    # The deterministic 80/20 split of this balanced fixture holds out member 7.
+    conn.executemany(
         f"INSERT INTO patients ({columns}) VALUES ({','.join('?' for _ in range(len(FEATURES) + 2))})",
-        [7, *inputs.values(), 0],
+        (
+            [member_id, *inputs.values(), (member_id - 1) % 2]
+            for member_id in range(1, 11)
+        ),
     )
     conn.commit()
     conn.close()
@@ -284,11 +288,6 @@ def test_completion_without_reassessment_and_constraints(database):
         conn.execute(
             "UPDATE outreach_cases SET outcome='bogus' WHERE case_id=?", (case_id,)
         )
-    conn.execute(
-        "INSERT INTO patients SELECT 8, "
-        + ",".join('"' + field + '"' for field in FEATURES)
-        + ", 0 FROM patients WHERE Member_ID=7"
-    )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO member_assessment_state(Member_ID, assessment_id, updated_at) VALUES (8, 1, 'now')"

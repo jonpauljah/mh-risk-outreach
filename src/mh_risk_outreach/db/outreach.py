@@ -1,15 +1,24 @@
 """Persist outreach cases while retaining their original assessment link.
 
-Eligibility and the full manager transition policy are separate later layers.
+The manager-facing policy lives in mh_risk_outreach.outreach_policy.
 """
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from mh_risk_outreach.config import DEFAULT_DB_PATH, FEATURES
 from mh_risk_outreach.db.assessments import _connect, _insert_assessment, _now
-from mh_risk_outreach.db.operational_scores import assessment_score_payload
+from mh_risk_outreach.db.operational_population import (
+    load_operational_member_ids,
+    require_operational_member,
+)
+from mh_risk_outreach.db.operational_scores import (
+    WRONG_POPULATION,
+    assessment_score_payload,
+    worklist_requires_refresh,
+)
 
 
 def create_case(
@@ -21,118 +30,137 @@ def create_case(
     recommendation_reason: str | None = None,
     recommendation_rule_version: str | None = None,
 ) -> int:
-    """Create a Pending case using current scored history or an on-demand baseline."""
+    """Persist a Pending case. Manager selections use OutreachPolicy.create_case."""
     if not recommendation:
         raise ValueError("recommendation is required")
     conn = _connect(db_path)
     try:
-        # Recheck active-case and assessment state under the same write lock as
-        # the eventual case insert, so a stale selection cannot duplicate work.
         conn.execute("BEGIN IMMEDIATE")
-        member = conn.execute(
-            "SELECT * FROM patients WHERE Member_ID=?", (member_id,)
-        ).fetchone()
-        if member is None:
-            raise ValueError(f"unknown member {member_id}")
-        if conn.execute(
-            "SELECT 1 FROM outreach_cases WHERE Member_ID=? AND status IN ('Pending','Accepted')",
-            (member_id,),
-        ).fetchone():
-            raise ValueError("member already has an active case")
-        current = conn.execute(
-            """SELECT a.* FROM member_assessment_state c JOIN risk_assessments a
-               ON a.assessment_id=c.assessment_id WHERE c.Member_ID=?""",
-            (member_id,),
-        ).fetchone()
-        if current is None:
-            # The first case creates its baseline, current pointer, and case
-            # together. Import and population scoring never create history.
-            if scoring is None:
-                published = conn.execute(
-                    """SELECT s.*, (SELECT COUNT(*) FROM operational_scores) AS cohort_size
-                       FROM operational_scores AS s WHERE s.Member_ID=?""",
-                    (member_id,),
-                ).fetchone()
-                if published is None:
-                    raise ValueError(
-                        f"member {member_id} has no published operational worklist score; "
-                        "run scoring with --operational first"
-                    )
-                baseline_result = assessment_score_payload(
-                    published,
-                    cohort_id=published["cohort_id"],
-                    cohort_calculated_at=published["calculated_at"],
-                    cohort_size=published["cohort_size"],
-                )
-            else:
-                baseline_result = dict(scoring)
-            inputs = {name: member[name] for name in FEATURES}
-            baseline_result["recommendation_action"] = recommendation
-            if recommendation_reason is not None:
-                baseline_result["recommendation_reason"] = recommendation_reason
-            if recommendation_rule_version is not None:
-                baseline_result["recommendation_rule_version"] = (
-                    recommendation_rule_version
-                )
-            assessment_id = _insert_assessment(
-                conn, member_id, inputs, "baseline", baseline_result
-            )
-            conn.execute(
-                "INSERT INTO member_assessment_state(Member_ID, assessment_id, updated_at) VALUES (?,?,?)",
-                (member_id, assessment_id, _now()),
-            )
-            current = conn.execute(
-                "SELECT * FROM risk_assessments WHERE assessment_id=?",
-                (assessment_id,),
-            ).fetchone()
-        else:
-            # Reuse the current snapshot only after its separate scoring run
-            # succeeded; an older score must not stand in for pending inputs.
-            if current["scoring_status"] != "Scored":
-                raise ValueError("current assessment is pending scoring")
-            assessment_id = int(current["assessment_id"])
-        stored_action = current["recommendation_action"]
-        # Copy the assessment's proposal into the case without allowing the
-        # caller to silently change the historical recommendation.
-        if stored_action is None:
-            raise ValueError("current assessment has no stored recommendation action")
-        if recommendation != stored_action:
-            raise ValueError(
-                "case action conflicts with current assessment recommendation"
-            )
-        case_action = stored_action
-        # A completed case frees the active slot, but its assessment remains
-        # used; a later case needs a new, finalized assessment.
-        if conn.execute(
-            "SELECT 1 FROM outreach_cases WHERE assessment_id=?", (assessment_id,)
-        ).fetchone():
-            raise ValueError("current assessment has already been used for a case")
-        cursor = conn.execute(
-            """INSERT INTO outreach_cases
-               (Member_ID, assessment_id, status, outcome, recommended_action,
-                recommendation_reason, operational_model_name, model_version,
-                recommendation_rule_version, created_at)
-               VALUES (?, ?, 'Pending', NULL, ?, ?, ?, ?, ?, ?)""",
-            (
-                member_id,
-                assessment_id,
-                case_action,
-                current["recommendation_reason"],
-                current["operational_model_name"],
-                current["model_version"],
-                current["recommendation_rule_version"],
-                _now(),
-            ),
+        case_id = _create_case(
+            conn,
+            member_id,
+            recommendation,
+            scoring,
+            recommendation_reason=recommendation_reason,
+            recommendation_rule_version=recommendation_rule_version,
         )
         conn.commit()
-        if cursor.lastrowid is None:
-            raise RuntimeError("case insert did not return an ID")
-        return cursor.lastrowid
+        return case_id
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def _create_case(
+    conn: sqlite3.Connection,
+    member_id: int,
+    recommendation: str,
+    scoring: dict[str, Any] | None = None,
+    *,
+    recommendation_reason: str | None = None,
+    recommendation_rule_version: str | None = None,
+) -> int:
+    """Write a case and any new baseline inside the caller's write transaction."""
+    member = conn.execute(
+        "SELECT * FROM patients WHERE Member_ID=?", (member_id,)
+    ).fetchone()
+    if member is None:
+        raise ValueError(f"unknown member {member_id}")
+    member_ids = load_operational_member_ids(conn)
+    require_operational_member(member_id, member_ids)
+    if worklist_requires_refresh(conn, member_ids):
+        raise ValueError(WRONG_POPULATION)
+    if conn.execute(
+        "SELECT 1 FROM outreach_cases WHERE Member_ID=? AND status IN ('Pending','Accepted')",
+        (member_id,),
+    ).fetchone():
+        raise ValueError("member already has an active case")
+    current = conn.execute(
+        """SELECT a.* FROM member_assessment_state c JOIN risk_assessments a
+           ON a.assessment_id=c.assessment_id WHERE c.Member_ID=?""",
+        (member_id,),
+    ).fetchone()
+    if current is None:
+        # The first case creates its baseline, current pointer, and case
+        # together. Import and population scoring never create history.
+        if scoring is None:
+            published = conn.execute(
+                """SELECT s.*, (SELECT COUNT(*) FROM operational_scores) AS cohort_size
+                   FROM operational_scores AS s WHERE s.Member_ID=?""",
+                (member_id,),
+            ).fetchone()
+            if published is None:
+                raise ValueError(
+                    f"member {member_id} has no published operational worklist score; "
+                    "run scoring with --operational first"
+                )
+            baseline_result = assessment_score_payload(
+                published,
+                cohort_id=published["cohort_id"],
+                cohort_calculated_at=published["calculated_at"],
+                cohort_size=published["cohort_size"],
+            )
+        else:
+            baseline_result = dict(scoring)
+        inputs = {name: member[name] for name in FEATURES}
+        baseline_result["recommendation_action"] = recommendation
+        if recommendation_reason is not None:
+            baseline_result["recommendation_reason"] = recommendation_reason
+        if recommendation_rule_version is not None:
+            baseline_result["recommendation_rule_version"] = recommendation_rule_version
+        assessment_id = _insert_assessment(
+            conn, member_id, inputs, "baseline", baseline_result
+        )
+        conn.execute(
+            "INSERT INTO member_assessment_state(Member_ID, assessment_id, updated_at) VALUES (?,?,?)",
+            (member_id, assessment_id, _now()),
+        )
+        current = conn.execute(
+            "SELECT * FROM risk_assessments WHERE assessment_id=?",
+            (assessment_id,),
+        ).fetchone()
+    else:
+        # Reuse the current snapshot only after its separate scoring run
+        # succeeded; an older score must not stand in for pending inputs.
+        if current["scoring_status"] != "Scored":
+            raise ValueError("current assessment is pending scoring")
+        assessment_id = int(current["assessment_id"])
+    stored_action = current["recommendation_action"]
+    # Copy the assessment's proposal into the case without allowing the
+    # caller to silently change the historical recommendation.
+    if stored_action is None:
+        raise ValueError("current assessment has no stored recommendation action")
+    if recommendation != stored_action:
+        raise ValueError("case action conflicts with current assessment recommendation")
+    case_action = stored_action
+    # A completed case frees the active slot, but its assessment remains
+    # used; a later case needs a new, finalized assessment.
+    if conn.execute(
+        "SELECT 1 FROM outreach_cases WHERE assessment_id=?", (assessment_id,)
+    ).fetchone():
+        raise ValueError("current assessment has already been used for a case")
+    cursor = conn.execute(
+        """INSERT INTO outreach_cases
+           (Member_ID, assessment_id, status, outcome, recommended_action,
+            recommendation_reason, operational_model_name, model_version,
+            recommendation_rule_version, created_at)
+           VALUES (?, ?, 'Pending', NULL, ?, ?, ?, ?, ?, ?)""",
+        (
+            member_id,
+            assessment_id,
+            case_action,
+            current["recommendation_reason"],
+            current["operational_model_name"],
+            current["model_version"],
+            current["recommendation_rule_version"],
+            _now(),
+        ),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("case insert did not return an ID")
+    return cursor.lastrowid
 
 
 def get_case(

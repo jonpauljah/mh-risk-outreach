@@ -3,8 +3,15 @@
 ## Operational worklist and comparison
 
 Run `uv run python -m mh_risk_outreach.scoring --operational` to replace the
-SQLite `operational_scores` worklist for all imported members. Logistic
-regression is the default. Set `MH_RISK_OUTREACH_OPERATIONAL_MODEL` to
+SQLite `operational_scores` worklist for the fixed 2,000 held-out members. The
+stratified 80/20 split (seed 42) is reproduced from the original `patients`
+rows in member ID order. All 10,000 rows stay in SQLite. The other 8,000
+provide the training rows, risk-band fitting scores, and SHAP background.
+Model evaluation uses the original inputs for the same 2,000 held-out IDs.
+Outreach capacity K limits standard selections under the shared capacity
+policy and is configured independently of the size of the operational cohort.
+
+Logistic regression is the default. Set `MH_RISK_OUTREACH_OPERATIONAL_MODEL` to
 `logistic_regression`, `random_forest`, or `xgboost` to select the operational
 model. Scoring loads its latest trained version. See the
 [model selection rationale](ml-spec.md#operational-model-selection-issue-34).
@@ -46,8 +53,8 @@ scores keep their full precision.
 
 ## Assessment scoring and historical ranks
 
-A population refresh uses each member's latest finalized assessment inputs
-when available, otherwise their imported inputs. A pending reassessment
+A population refresh uses each held-out member's latest finalized assessment
+inputs when available, otherwise their imported inputs. A pending reassessment
 supplies the latest safety flags. The worklist marks `inputs_pending_scoring`
 and records `score_assessment_id` and `safety_assessment_id` when those inputs
 come from history. Population scoring leaves assessment history unchanged.
@@ -57,12 +64,12 @@ leaves that published worklist in place and asks for a rerun.
 `mh_risk_outreach.operational.score_operational_member` takes a member ID
 and the complete survey input snapshot. It evaluates those inputs with the
 worklist's model version and computes the candidate's rank by substituting
-the candidate row in the same cohort. It returns score, band, rank,
+the candidate row in the 2,000-member cohort. It returns score, band, rank,
 explanation, model, version, cohort rank context, and the recommendation fields
 for the persistence API. This calculation leaves the published worklist and
 assessment history unchanged. The context records the worklist ID,
 scope, size, calculation times, safety-review status, and ordering policy.
-Refresh the full worklist before ranking with a different operational model
+Refresh the worklist before ranking with a different operational model
 or a new version.
 
 When creating a member's first case without a supplied score,
@@ -74,10 +81,11 @@ baseline and the case. The member must already have a published worklist score.
 
 After submitting a reassessment, call
 `mh_risk_outreach.operational.finalize_operational_reassessment` with the latest
-pending assessment ID. It reruns scoring for the full population and uses the
-pending snapshot for that member's score and recommendation. It archives the
-score, exact rank context, and recommendation and publishes the new cohort in
-one transaction. If supplied, precomputed recommendation fields must match the
+pending assessment ID. It reruns scoring and ranking for the 2,000 held-out
+members and uses the pending snapshot for that member's score and
+recommendation. It archives the score, exact rank context, and recommendation
+and publishes the new cohort in one transaction. If supplied, precomputed
+recommendation fields must match the
 generated values before the transaction can write. The published cohort must
 match the configured operational model and current artifact version before the
 run. An overlapping
@@ -85,6 +93,34 @@ assessment submission, worklist refresh, configured model switch, or artifact
 update can invalidate the run. Scoring or write failures preserve the existing
 assessment history and worklist. Historical assessments and cases retain the
 scores, ranks, and versions recorded when they were created.
+
+Training members cannot receive operational previews or recommendations,
+submit or finalize reassessments, or start outreach cases. Changes in
+assessments, model versions, and scoring runs leave membership and the
+original evaluation inputs intact.
+
+## Recovering an existing database
+
+Run the read-only audit against the existing SQLite file, then refresh its
+operational worklist with the configured model.
+
+```bash
+uv run python -m mh_risk_outreach.scoring --audit-operational --db patients.db
+uv run python -m mh_risk_outreach.scoring --operational --db patients.db
+```
+
+The audit reports the published count and flags any published worklist whose
+member IDs differ from the holdout, including the old 10,000-row worklist.
+Until refresh succeeds, operational previews, reassessment finalization, and
+outreach case creation reject that worklist. Safety Review continues to
+display live concerns for held-out members with selection disabled. Refresh
+atomically replaces `operational_scores` and preserves assessment and case history.
+
+The audit lists out-of-scope assessment and case IDs with their statuses.
+Review any reported history. Existing Pending and Accepted cases continue
+consuming shared capacity K until resolved through the case process. Out-of-scope
+pending assessments stay in history and cannot be finalized. Historical scores
+and ranks retain the cohort recorded at the time.
 
 ## Outreach recommendation rules
 

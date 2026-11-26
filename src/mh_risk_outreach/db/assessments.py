@@ -19,6 +19,10 @@ from mh_risk_outreach.config import (
     REAL_HOURS,
     TEXT_CATEGORIES,
 )
+from mh_risk_outreach.db.operational_population import (
+    load_operational_member_ids,
+    require_operational_member,
+)
 from mh_risk_outreach.db.repository import init_schema
 
 
@@ -176,6 +180,14 @@ def submit_reassessment(
         # The pointer read and both writes share a write lock. This also keeps
         # concurrent submissions from merging against an outdated snapshot.
         conn.execute("BEGIN IMMEDIATE")
+        if (
+            conn.execute(
+                "SELECT 1 FROM patients WHERE Member_ID = ?", (member_id,)
+            ).fetchone()
+            is None
+        ):
+            raise ValueError(f"unknown member {member_id}")
+        require_operational_member(member_id, load_operational_member_ids(conn))
         current = conn.execute(
             """SELECT a.inputs_json FROM member_assessment_state c
                JOIN risk_assessments a USING (assessment_id)
@@ -183,11 +195,6 @@ def submit_reassessment(
             (member_id,),
         ).fetchone()
         if current is None:
-            exists = conn.execute(
-                "SELECT 1 FROM patients WHERE Member_ID = ?", (member_id,)
-            ).fetchone()
-            if exists is None:
-                raise ValueError(f"unknown member {member_id}")
             raise ValueError(
                 "member has no assessment history; first case creates the baseline"
             )
@@ -235,6 +242,11 @@ def _finalize_scoring(
 ) -> None:
     # Only the latest pending assessment may transition to Scored. A trigger
     # prevents subsequent edits to any finalized scoring snapshot.
+    member = conn.execute(
+        "SELECT Member_ID FROM risk_assessments WHERE assessment_id=?", (assessment_id,)
+    ).fetchone()
+    if member is not None:
+        require_operational_member(member[0], load_operational_member_ids(conn))
     cur = conn.execute(
         """UPDATE risk_assessments SET scoring_status='Scored', risk_score=?,
            band_level_priority=?, rank_priority=?, rank_context_json=?, explanation=?,
