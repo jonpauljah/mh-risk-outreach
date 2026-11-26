@@ -9,6 +9,7 @@ from uuid import uuid4
 import pandas as pd
 
 from mh_risk_outreach.config import (
+    CRITICAL_INDICATORS,
     DEFAULT_DB_PATH,
     FEATURES,
     MEMBER_ID,
@@ -33,8 +34,13 @@ from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
     load_scoring_artifact,
 )
+from mh_risk_outreach.recommendations import (
+    DEFAULT_RECOMMENDATION_RULES,
+    RecommendationRules,
+    recommend_action,
+)
 from mh_risk_outreach.scoring import (
-    CRITICAL_INDICATORS,
+    SHAP_CONTRIBUTIONS,
     rank_members,
     score_members,
 )
@@ -90,10 +96,14 @@ def finalize_operational_reassessment(
     recommendation_action: str | None = None,
     recommendation_reason: str | None = None,
     recommendation_rule_version: str | None = None,
+    recommendation_rules: RecommendationRules = DEFAULT_RECOMMENDATION_RULES,
     db_path: str = DEFAULT_DB_PATH,
     artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
 ) -> None:
-    """Finalize the current pending reassessment and publish its updated cohort."""
+    """Finalize the score and recommendation and publish the updated cohort.
+
+    Supplied recommendation metadata must agree with the generated fields.
+    """
     patients, assessment_inputs, cohort = load_operational_inputs(db_path)
     pending = next(
         (
@@ -119,9 +129,10 @@ def finalize_operational_reassessment(
         )
     artifact = load_scoring_artifact(model, artifacts_dir, version=cohort.model_version)
     worklist = _build_operational_worklist(
-        patients, assessment_inputs, artifact, pending_id=assessment_id
+        patients, assessment_inputs, artifact, pending=pending
     )
     row = worklist.loc[worklist[MEMBER_ID].eq(pending.member_id)].iloc[0]
+    contributions = worklist.pop(SHAP_CONTRIBUTIONS).at[row.name]
     result = assessment_score_payload(
         row,
         cohort_id=str(row["cohort_id"]),
@@ -129,10 +140,20 @@ def finalize_operational_reassessment(
         cohort_size=len(worklist),
     )
     result.update(
-        recommendation_action=recommendation_action,
-        recommendation_reason=recommendation_reason,
-        recommendation_rule_version=recommendation_rule_version,
+        recommend_action(
+            json.loads(pending.current_inputs),
+            contributions,
+            rules=recommendation_rules,
+        )
     )
+    supplied = {
+        "recommendation_action": recommendation_action,
+        "recommendation_reason": recommendation_reason,
+        "recommendation_rule_version": recommendation_rule_version,
+    }
+    for field, value in supplied.items():
+        if value is not None and value != result[field]:
+            raise ValueError(f"{field} disagrees with the generated recommendation")
     save_operational_scores(
         worklist,
         expected_inputs=assessment_inputs,
@@ -148,7 +169,7 @@ def _build_operational_worklist(
     assessment_inputs: list[AssessmentInputs],
     artifact: ScoringArtifact,
     *,
-    pending_id: int | None = None,
+    pending: AssessmentInputs | None = None,
 ) -> pd.DataFrame:
     if patients.empty:
         raise ValueError(
@@ -159,7 +180,9 @@ def _build_operational_worklist(
     provenance = {}
     for assessment in assessment_inputs:
         member_id = assessment.member_id
-        is_finalizing = assessment.current_id == pending_id
+        is_finalizing = (
+            pending is not None and assessment.current_id == pending.current_id
+        )
         scored_inputs = (
             assessment.current_inputs if is_finalizing else assessment.scored_inputs
         )
@@ -183,6 +206,7 @@ def _build_operational_worklist(
         members.reset_index(drop=True),
         artifact,
         background=background,
+        contributions_for_member=pending.member_id if pending is not None else None,
     )
     source_columns = [
         "score_assessment_id",
@@ -207,10 +231,11 @@ def score_operational_member(
     member_id: int,
     inputs: dict[str, object],
     *,
+    recommendation_rules: RecommendationRules = DEFAULT_RECOMMENDATION_RULES,
     db_path: str = DEFAULT_DB_PATH,
     artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
 ) -> dict[str, object]:
-    """Score one complete survey input snapshot against the published worklist.
+    """Score and recommend an action for one complete survey input snapshot.
 
     The payload fits #32's scoring API. It records rank against the worklist
     read for this calculation, with the candidate substituted for its old row.
@@ -235,15 +260,19 @@ def score_operational_member(
         pd.DataFrame([{MEMBER_ID: member_id, **inputs}]),
         artifact,
         background=background,
+        contributions_for_member=member_id,
     )
+    contributions = candidate.pop(SHAP_CONTRIBUTIONS).iat[0]
     peers = cohort.loc[~cohort[MEMBER_ID].eq(member_id), list(candidate.columns)]
     ranked = rank_members(pd.concat([peers, candidate], ignore_index=True))
     row = ranked.loc[ranked[MEMBER_ID].eq(member_id)].iloc[0]
     row["operational_model_name"] = model
-    return assessment_score_payload(
+    result = assessment_score_payload(
         row,
         cohort_id=str(cohort["cohort_id"].iat[0]),
         cohort_calculated_at=str(cohort["calculated_at"].iat[0]),
         cohort_size=len(cohort),
         calculated_at=datetime.now(UTC).isoformat(),
     )
+    result.update(recommend_action(inputs, contributions, rules=recommendation_rules))
+    return result

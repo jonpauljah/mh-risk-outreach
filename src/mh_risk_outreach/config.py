@@ -70,10 +70,10 @@ TEXT_CATEGORIES = [
     "Discuss_Mental_Health",
 ]
 # ---- Binary 0/1 flags (stored INTEGER, CHECK IN (0, 1)) ----
+CRITICAL_INDICATORS = ("Self_Harm_Thoughts", "Suicidal_Thoughts")
 BINARY_FLAGS = [
     "Ever_Bullied_At_Work",
-    "Self_Harm_Thoughts",
-    "Suicidal_Thoughts",
+    *CRITICAL_INDICATORS,
     "Family_History_Mental_Illness",
     "Previously_Diagnosed",
     "Ever_Sought_Treatment",
