@@ -68,7 +68,7 @@ implementation guide.
 | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) | Deterministic NBA rules | #33–#35 | [PR #50](https://github.com/jonpauljah/mh-risk-outreach/pull/50) integrates [versioned rules](../risk-scoring.md#outreach-recommendation-rules) with operational assessment scoring. |
 | [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | [PR #51](https://github.com/jonpauljah/mh-risk-outreach/pull/51) implements both worklists, configurable shared capacity K, and transactional creation checks. |
 | [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38) | Case lifecycle | #32, #37; #35, #36 | Lifecycle policy is planned. Case storage primitives are available from #32. |
-| [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) | Worklists and case creation UI | #37, #38 | Planned. |
+| [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) | Worklists and case creation UI | #37, #38 | Outreach Management includes Safety Review, Standard Outreach, and Active Cases. |
 | [#40](https://github.com/jonpauljah/mh-risk-outreach/issues/40) | Active case management UI | #38, #39 | Planned. |
 | [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) | Manual reassessment and demo presets | #34–#38 | Streamlit submission flow and presets are planned. Backend submission and finalization are available from #32 and #35. |
 | [#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42) | Read-only history and comparisons | #38, #39, #41 | Planned. |

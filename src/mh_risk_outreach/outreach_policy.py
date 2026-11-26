@@ -3,7 +3,7 @@
 import json
 from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from sqlite3 import Connection
 
 from mh_risk_outreach.config import CRITICAL_INDICATORS, DEFAULT_DB_PATH, FEATURES
@@ -11,6 +11,7 @@ from mh_risk_outreach.db.assessments import _connect
 from mh_risk_outreach.db.operational_population import load_operational_member_ids
 from mh_risk_outreach.db.operational_scores import (
     WRONG_POPULATION,
+    _published_cohort,
     worklist_requires_refresh,
 )
 from mh_risk_outreach.db.outreach import _create_case
@@ -22,7 +23,7 @@ from mh_risk_outreach.operational import (
     operational_model_name,
     score_operational_member,
 )
-from mh_risk_outreach.recommendations import SAFETY_REVIEW_ACTION
+from mh_risk_outreach.recommendations import SAFETY_REVIEW_ACTION, recommend_action
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,12 @@ class OutreachCandidate:
     safety_flags: tuple[str, ...]
     pending_scoring: bool
     selectable: bool
+    # The fields above identify the selection rechecked by create_cases().
+    risk_score: float | None = field(default=None, compare=False)
+    explanation: str | None = field(default=None, compare=False)
+    recommendation_action: str | None = field(default=None, compare=False)
+    recommendation_reason: str | None = field(default=None, compare=False)
+    has_active_case: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,7 @@ class OutreachWorklists:
     safety_review: tuple[OutreachCandidate, ...]
     standard_outreach: tuple[OutreachCandidate, ...]
     requires_score_refresh: bool = False
+    scoring_issue: str | None = None
 
 
 # Use live input flags instead of cached flags on the published score. A manual
@@ -56,8 +64,9 @@ _LATEST_FLAGS = ", ".join(
 )
 _CANDIDATES = f"""
     SELECT p.Member_ID, state.assessment_id, a.source, a.scoring_status,
-           a.recommendation_action,
+           a.recommendation_action, a.recommendation_reason,
            score.cohort_id, score.band_level_priority, score.rank_priority,
+           score.risk_score, score.reasoning,
            {_LATEST_FLAGS},
            EXISTS (
                SELECT 1 FROM outreach_cases AS active WHERE active.Member_ID = p.Member_ID
@@ -113,12 +122,7 @@ class OutreachPolicy:
         slots = max(0, self.capacity - active)
         member_ids = load_operational_member_ids(conn)
         requires_refresh = worklist_requires_refresh(conn, member_ids)
-        model = operational_model_name()
-        version = (
-            None
-            if requires_refresh
-            else artifact_model_version(model, self.artifacts_dir)
-        )
+        model, version, scoring_issue = self._scoring_context(conn, requires_refresh)
         safety: list[OutreachCandidate] = []
         standard: list[OutreachCandidate] = []
         for row in conn.execute(
@@ -157,6 +161,14 @@ class OutreachPolicy:
             ):
                 continue
 
+            reason = row["recommendation_reason"]
+            if flags and action != SAFETY_REVIEW_ACTION:
+                recommendation = recommend_action(
+                    {flag: row[flag] for flag in CRITICAL_INDICATORS}
+                )
+                action = recommendation["recommendation_action"]
+                reason = recommendation["recommendation_reason"]
+
             candidate = OutreachCandidate(
                 member_id=row["Member_ID"],
                 assessment_id=assessment_id,
@@ -166,11 +178,41 @@ class OutreachPolicy:
                 safety_flags=flags,
                 pending_scoring=row["scoring_status"] == "PendingScoring",
                 selectable=selectable,
+                risk_score=row["risk_score"],
+                explanation=row["reasoning"],
+                recommendation_action=action,
+                recommendation_reason=reason,
+                has_active_case=bool(row["has_active_case"]),
             )
             (safety if flags else standard).append(candidate)
         return OutreachWorklists(
-            active, slots, tuple(safety), tuple(standard), requires_refresh
+            active,
+            slots,
+            tuple(safety),
+            tuple(standard),
+            requires_refresh,
+            scoring_issue,
         )
+
+    def _scoring_context(
+        self, conn: Connection, requires_refresh: bool
+    ) -> tuple[str | None, str | None, str | None]:
+        if requires_refresh:
+            return None, None, WRONG_POPULATION
+        try:
+            model = operational_model_name()
+            version = artifact_model_version(model, self.artifacts_dir)
+        except (TypeError, ValueError) as exc:
+            return None, None, str(exc)
+        if version is None:
+            return None, None, f"Train the configured operational model ({model})."
+        cohort = _published_cohort(conn)
+        if cohort is None or (cohort.model_name, cohort.model_version) != (
+            model,
+            version,
+        ):
+            return None, None, "Publish scores for the configured operational model."
+        return model, version, None
 
     def create_case(self, selection: OutreachCandidate) -> int:
         """Create a single case using the same policy as a bulk selection."""

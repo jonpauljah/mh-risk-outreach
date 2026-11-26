@@ -131,7 +131,28 @@
    data is safe and skips; the prototype has no dataset reset or replacement
    workflow.
 
-7. Run the baseline test:
+7. Open **Outreach Management** from the Streamlit sidebar.
+
+   **Safety Review** shows unreviewed concerns at any risk band, including
+   when standard capacity is full. A concern can remain visible while its
+   current assessment awaits scoring or the member has an active case.
+   **Standard Outreach** lists eligible members in contact order within the
+   remaining slots. Each eligible row shows the recommended action and its
+   explanation alongside the model score and band.
+
+   Select the member IDs in a worklist and click **Create Outreach Cases**.
+   Each selected member gets one Pending case if the batch succeeds. If the
+   worklist changed during review, use the refreshed queue to make a new
+   selection. **Active Cases** lists Pending and Accepted cases. Select a case
+   and choose **Update Case** to open its details. Use **Refresh outreach** to
+   reload lists and capacity after changes made in another session.
+
+   The prototype's default shared capacity is 100 active cases. Set
+   `MH_RISK_OUTREACH_CAPACITY` before launching Streamlit to use a different
+   nonnegative limit. Pending and Accepted cases from either queue count
+   toward K. Eligible safety cases can still be created at that limit.
+
+8. Run the baseline test:
 
    ```bash
    uv run pytest

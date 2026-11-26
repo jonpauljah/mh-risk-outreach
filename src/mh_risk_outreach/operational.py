@@ -34,12 +34,15 @@ from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
     load_scoring_artifact,
 )
+from mh_risk_outreach.reasons import build_reasons_and_contributions
 from mh_risk_outreach.recommendations import (
     DEFAULT_RECOMMENDATION_RULES,
+    Recommendation,
     RecommendationRules,
     recommend_action,
 )
 from mh_risk_outreach.scoring import (
+    REASON_CHUNK_SIZE,
     SHAP_CONTRIBUTIONS,
     rank_members,
     score_members,
@@ -273,3 +276,37 @@ def score_operational_member(
     )
     result.update(recommend_action(inputs, contributions, rules=recommendation_rules))
     return result
+
+
+def recommend_operational_baselines(
+    member_ids: tuple[int, ...],
+    cohort_id: str,
+    *,
+    db_path: str = DEFAULT_DB_PATH,
+    artifacts_dir: str = DEFAULT_ARTIFACTS_DIR,
+) -> dict[int, Recommendation]:
+    """Preview first-case actions in one SHAP batch using the published model."""
+    split, _, cohort = load_operational_inputs(db_path, require_current_population=True)
+    if cohort is None or cohort.cohort_id != cohort_id:
+        raise ValueError("Operational scoring changed. Refresh the outreach worklists.")
+    model = operational_model_name()
+    if not _active_artifact_matches(
+        model, cohort.model_name, cohort.model_version, artifacts_dir
+    ):
+        raise ValueError("Operational model changed. Refresh the outreach worklists.")
+
+    members = split.evaluation.loc[split.evaluation[MEMBER_ID].isin(member_ids)]
+    if set(members[MEMBER_ID]) != set(member_ids):
+        raise ValueError("A selected member is outside the operational population.")
+    artifact = load_scoring_artifact(model, artifacts_dir, version=cohort.model_version)
+    _, contributions = build_reasons_and_contributions(
+        artifact.pipeline,
+        members,
+        split.train,
+        contribution_rows=range(len(members)),
+        chunk_size=REASON_CHUNK_SIZE,
+    )
+    return {
+        member[MEMBER_ID]: recommend_action(member, contributions[position])
+        for position, member in enumerate(members.to_dict("records"))
+    }
