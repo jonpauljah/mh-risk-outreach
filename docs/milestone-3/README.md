@@ -62,7 +62,7 @@ implementation guide.
 | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) | Operational model and stable bands | #33, #32 | Operational scoring and versioned bands implemented in [PR #47](https://github.com/jonpauljah/mh-risk-outreach/pull/47). |
 | [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) | Current and historical assessments | #32, #34 | Backend integration implemented for first-case baselines and explicit reassessment finalization. |
 | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) | Deterministic NBA rules | #33–#35 | [Versioned rules](../risk-scoring.md#outreach-recommendation-rules) are integrated with operational assessment scoring. |
-| [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | Planned. |
+| [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) | Eligibility, safety, capacity | #35, #36 | Backend worklists and transactional creation checks are implemented. |
 | [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38) | Case lifecycle | #32, #37; #35, #36 | Lifecycle policy is planned. Case storage primitives are available from #32. |
 | [#39](https://github.com/jonpauljah/mh-risk-outreach/issues/39) | Worklists and case creation UI | #37, #38 | Planned. |
 | [#40](https://github.com/jonpauljah/mh-risk-outreach/issues/40) | Active case management UI | #38, #39 | Planned. |
@@ -71,8 +71,8 @@ implementation guide.
 
 ## Remaining Work and Implementation Order
 
-1. Build eligibility and capacity policy (#37), then enforce the case lifecycle
-   and transactional creation (#38). The manager-driven creation flow differs
+1. Apply the eligibility and capacity policy to the case lifecycle (#38).
+   The manager-driven creation flow differs
    from client contract wording and requires sponsor approval, as #37 notes.
 2. Integrate worklists (#39), case management (#40), and deliberate manual
    reassessment (#41) in Streamlit. Add read-only reporting (#42) after case and

@@ -40,7 +40,11 @@ from mh_risk_outreach.operational import (
     refresh_operational_worklist,
     score_operational_member,
 )
-from mh_risk_outreach.recommendations import DEFAULT_RECOMMENDATION_RULES
+from mh_risk_outreach.outreach_policy import OutreachPolicy
+from mh_risk_outreach.recommendations import (
+    DEFAULT_RECOMMENDATION_RULES,
+    SAFETY_REVIEW_ACTION,
+)
 from mh_risk_outreach.scoring import run as score_comparison
 
 RECOMMENDATION_FIELDS = (
@@ -77,6 +81,60 @@ def test_configuration(monkeypatch):
     monkeypatch.setenv(OPERATIONAL_MODEL_ENV, "all")
     with pytest.raises(ValueError, match=OPERATIONAL_MODEL_ENV):
         operational_model_name()
+
+
+def test_policy_uses_published_scores_and_finalized_recommendations(setup_scoring):
+    paths, records = setup_scoring
+    db = paths["db_path"]
+    policy = OutreachPolicy(1, **paths)
+    published = refresh_operational_worklist(**paths)
+    (selected,) = policy.worklists().standard_outreach
+    case_id = policy.create_case(selected)
+    baseline_case = get_case(case_id, db)
+    row = published.loc[published[MEMBER_ID].eq(selected.member_id)].iloc[0]
+    inputs = records.loc[records[MEMBER_ID].eq(selected.member_id), FEATURES]
+    preview = score_operational_member(
+        selected.member_id, inputs.iloc[0].to_dict(), **paths
+    )
+    assert baseline_case["risk_score"] == row["risk_score"]
+    assert baseline_case["model_version"] == row["model_version"]
+    assert baseline_case["band_level_priority"] == row["band_level_priority"]
+    assert baseline_case["recommended_action"] == preview["recommendation_action"]
+    assert baseline_case["recommendation_reason"] == preview["recommendation_reason"]
+
+    assessment_id = submit_reassessment(
+        selected.member_id, {"Suicidal_Thoughts": 1}, db
+    )
+    pending = next(
+        c for c in policy.worklists().safety_review if c.member_id == selected.member_id
+    )
+    assert pending.pending_scoring and not pending.selectable
+    finalize_operational_reassessment(assessment_id, **paths)
+    update_case_decision(
+        case_id,
+        {
+            "status": "Completed",
+            "accepted_at": "2026-11-16T11:15:00+00:00",
+            "outcome": "Reached — engaged",
+            "outcome_recorded_at": "2026-11-16T11:30:00+00:00",
+            "completed_at": "2026-11-16T12:00:00+00:00",
+        },
+        db,
+    )
+    no_standard_slots = replace(policy, capacity=0)
+    concern = next(
+        c
+        for c in no_standard_slots.worklists().safety_review
+        if c.member_id == selected.member_id
+    )
+    assert concern.selectable
+    flagged_case = get_case(no_standard_slots.create_case(concern), db)
+    saved_assessment = get_assessment(assessment_id, db)
+    assert flagged_case["assessment_id"] == assessment_id
+    assert flagged_case["recommended_action"] == SAFETY_REVIEW_ACTION
+    assert (
+        flagged_case["band_level_priority"] == saved_assessment["band_level_priority"]
+    )
 
 
 def test_candidate_is_read_only_and_snapshots_survive_refresh(

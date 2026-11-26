@@ -21,7 +21,7 @@ documentation for details.
 | `member_assessment_state` | Reference to the latest submitted assessment, potentially pending. PR #45 implemented this table. |
 | `outreach_cases` | Case, originating assessment, recommendation, decisions, and outcome. PR #45 implemented storage. |
 | Scoring | [#34](https://github.com/jonpauljah/mh-risk-outreach/issues/34) provides the operational worklist, saved boundaries, and assessment score payloads. [#35](https://github.com/jonpauljah/mh-risk-outreach/issues/35) connects scoring and assessment persistence for first-case baselines and explicit reassessment finalization. |
-| NBA and eligibility | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) provides versioned recommendations with safety precedence. Safety routing, capacity, and transactional eligibility checks are planned in [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37). |
+| NBA and eligibility | [#36](https://github.com/jonpauljah/mh-risk-outreach/issues/36) provides versioned recommendations with safety precedence. [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37) supplies safety routing, worklists, and transactional eligibility checks. |
 | Case lifecycle and UI | Planned transition policy and Streamlit integration in [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38)–[#42](https://github.com/jonpauljah/mh-risk-outreach/issues/42). #45 provides the persistence operations. |
 
 ```mermaid
@@ -82,11 +82,11 @@ the last scored result, and any current safety flags.
 ## NBA Recommendation Workflow
 
 Operational preview returns one action, reason, and rule version alongside the
-score. A first-case caller can preview the `patients` snapshot and explicitly
-pass the result into case persistence. Reassessment finalization uses the
-pending snapshot and the same model run for scoring and recommendation. It
-archives the recommendation in the assessment, and later cases copy it from
-their originating assessment.
+score. For a first case, the manager policy generates the recommendation from
+the saved `patients` snapshot. Reassessment finalization uses the pending
+snapshot and the same model run for scoring and recommendation. It archives
+the recommendation in the assessment, and later cases copy it from their
+originating assessment.
 
 The [versioned rules](../risk-scoring.md#outreach-recommendation-rules) give
 safety flags precedence across all bands and use structured SHAP contributions
@@ -96,22 +96,30 @@ Displaying a recommendation while scoring is pending is a later UI integration.
 
 ## Outreach Eligibility and Capacity
 
-The planned [#37](https://github.com/jonpauljah/mh-risk-outreach/issues/37)
-policy separates **Safety Review** from **Standard Outreach**. Safety concerns
-remain visible regardless of band or capacity. Standard candidates are unflagged,
-High or Very High on the current applicable model assessment, and have no active
-case. Managers select candidates; the service rechecks eligibility, freshness,
-capacity, and duplicate active cases atomically at creation.
+Configure one shared `OutreachPolicy(capacity=K)` for the database.
+`worklists()` returns **Safety Review**, **Standard Outreach**, and the
+remaining standard slots. Safety Review reads flags directly from the latest
+saved inputs. A case linked to those inputs removes that snapshot from the
+queue. A newer flagged snapshot appears even while a case for an earlier
+snapshot is active or the new snapshot is awaiting scoring.
 
-Configurable shared capacity **K** counts all Pending and Accepted cases. Standard
-slots are `max(0, K - active cases)`; necessary safety cases may exceed K under
-the safety exception. A completed case releases its slot, but repeat standard
-outreach requires a newer qualifying manual assessment and current eligibility;
-preview-only demo edits do not qualify. The #45 persistence API requires a
-scored current assessment for a new case. A pending reassessment blocks case
-creation until scoring finalizes it. Its safety flags still require review.
-Handling safety recommendations before scoring remains an integration decision.
-The manager-selected flow also needs the sponsor approval noted in #37.
+Standard candidates are unflagged, have no active case, and have a qualifying
+High or Very High score in the published cohort for the configured model and
+version. Pending and Accepted cases from both queues consume the shared
+capacity. The worklist offers the top `max(0, K - active cases)` standard
+candidates by current model priority. Safety selections with a current score
+can exceed K. A pending assessment's safety flags remain visible while case
+creation awaits scoring and any prior active case's completion.
+
+Pass the selected entry to `OutreachPolicy.create_case(selection)`. It
+checks the current worklists again under the same SQLite write lock used to
+create the case. A stale selection requires refreshing the worklists.
+For a first case, the service generates the recommendation from the imported
+inputs and saves a baseline from the published score. Later cases reuse the
+recommendation on the finalized assessment. Completing a case frees a slot.
+Repeat standard outreach requires a newer qualifying manual assessment and
+continued eligibility. Read-only demo previews leave eligibility unchanged.
+The manager-selected flow requires the sponsor approval noted in #37.
 
 ## Case Lifecycle
 
