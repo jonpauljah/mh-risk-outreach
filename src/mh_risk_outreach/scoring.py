@@ -9,7 +9,7 @@ Run it:
 
 import argparse
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,7 @@ def score_members(
     progress: Callable[[float], None] | None = None,
     chunk_size: int = REASON_CHUNK_SIZE,
     contributions_for_member: int | None = None,
+    contributions_for_members: Collection[int] = (),
 ) -> pd.DataFrame:
     """Score ``records`` and return the worklist DataFrame for one model.
 
@@ -84,14 +85,16 @@ def score_members(
     ``band_level_priority``, ``safety_review_required``,
     ``rank_priority`` (1 = contact first), ``reasoning``.
     Rows are returned already sorted by ``rank_priority``.
-    With ``contributions_for_member``, the worklist also carries that member's
-    named, signed SHAP contributions for use in the current scoring run.
+    Named, signed SHAP contributions can be requested for one or several members.
     """
     risk_score = predict_risk_scores(artifact.pipeline, records)
     bands = assign_bands(risk_score, artifact.cut_points)
+    requested = set(contributions_for_members)
+    if contributions_for_member is not None:
+        requested.add(contributions_for_member)
     contribution_rows = (
-        np.flatnonzero(records[MEMBER_ID].eq(contributions_for_member).to_numpy())
-        if contributions_for_member is not None
+        np.flatnonzero(records[MEMBER_ID].isin(requested).to_numpy())
+        if requested
         else ()
     )
     reasons, contributions_by_row = build_reasons_and_contributions(
@@ -113,7 +116,7 @@ def score_members(
             "reasoning": reasons,
         }
     )
-    if contributions_for_member is not None:
+    if requested:
         worklist[SHAP_CONTRIBUTIONS] = [
             contributions_by_row.get(row) for row in range(len(worklist))
         ]

@@ -1,7 +1,9 @@
 """Streamlit worklists and manager-selected outreach case creation."""
 
+import logging
 import os
 import sqlite3
+from dataclasses import replace
 from hashlib import sha256
 from typing import Any
 
@@ -14,12 +16,9 @@ from mh_risk_outreach.config import (
     DEFAULT_TABLE,
     OUTREACH_CAPACITY_ENV,
 )
-from mh_risk_outreach.db.outreach import list_active_cases
 from mh_risk_outreach.db.repository import database_status
 from mh_risk_outreach.models.artifacts import DEFAULT_ARTIFACTS_DIR
-from mh_risk_outreach.operational import recommend_operational_baselines
 from mh_risk_outreach.outreach_policy import OutreachCandidate, OutreachPolicy
-from mh_risk_outreach.recommendations import Recommendation
 
 SCORE_COMMAND = "uv run python -m mh_risk_outreach.scoring --operational"
 SAFETY_LABELS = {
@@ -28,22 +27,16 @@ SAFETY_LABELS = {
 }
 CREATION_RESULT = "outreach_creation_result"
 UPDATE_CASE_ID = "outreach_update_case_id"
-
-
-@st.cache_data(
-    scope="session", max_entries=8, show_spinner="Preparing recommendations…"
-)
-def _baseline_recommendations(
-    member_ids: tuple[int, ...], cohort_id: str, db_path: str, artifacts_dir: str
-) -> dict[int, Recommendation]:
-    return recommend_operational_baselines(
-        member_ids, cohort_id, db_path=db_path, artifacts_dir=artifacts_dir
-    )
+logger = logging.getLogger(__name__)
 
 
 def _selection_status(candidate: OutreachCandidate) -> str:
     if candidate.selectable:
-        return "Eligible"
+        return (
+            "Eligible"
+            if candidate.recommendation_action is not None
+            else "Recommendation unavailable"
+        )
     reasons = []
     if candidate.has_active_case:
         reasons.append("Member already has an active case")
@@ -54,31 +47,21 @@ def _selection_status(candidate: OutreachCandidate) -> str:
     return ". ".join(reasons) or "Current assessment is ineligible for case creation"
 
 
-def _candidate_row(
-    candidate: OutreachCandidate, preview: Recommendation | None
-) -> dict[str, object]:
+def _candidate_row(candidate: OutreachCandidate) -> dict[str, object]:
     row: dict[str, object] = {"Member ID": candidate.member_id}
     if candidate.safety_flags:
         row["Safety concerns"] = ". ".join(
             SAFETY_LABELS[flag] for flag in candidate.safety_flags
         )
-        row["Case creation"] = _selection_status(candidate)
     row.update(
         {
             "Risk score": candidate.risk_score,
             "Risk band": candidate.band,
             "Contact rank": candidate.rank,
-            "Recommended action": (
-                preview["recommendation_action"]
-                if preview
-                else candidate.recommendation_action
-            ),
-            "Recommendation explanation": (
-                preview["recommendation_reason"]
-                if preview
-                else candidate.recommendation_reason
-            ),
+            "Recommended action": candidate.recommendation_action,
+            "Recommendation explanation": candidate.recommendation_reason,
             "Model explanation": candidate.explanation,
+            "Case creation": _selection_status(candidate),
         }
     )
     return row
@@ -145,25 +128,21 @@ def _worklist(
         st.info(empty_message)
         return
 
-    previews: dict[int, Recommendation] = {}
-    needs_preview = tuple(c for c in candidates if c.recommendation_action is None)
-    previews_ready = True
-    if needs_preview and (cohort := needs_preview[0].cohort_id) is not None:
+    if any(c.selectable and c.recommendation_action is None for c in candidates):
         try:
-            previews = _baseline_recommendations(
-                tuple(c.member_id for c in needs_preview),
-                cohort,
-                policy.db_path,
-                policy.artifacts_dir,
+            with st.spinner("Preparing recommendations…"):
+                previews = policy.prepare_recommendations(candidates)
+        except (SystemExit, Exception) as exc:
+            logger.exception("Could not prepare outreach recommendations")
+            st.warning(f"Some recommendations could not be prepared. {exc}")
+        else:
+            candidates = tuple(
+                replace(c, **previews[c.member_id]) if c.member_id in previews else c
+                for c in candidates
             )
-        except (SystemExit, TypeError, ValueError, sqlite3.Error) as exc:
-            previews_ready = False
-            st.error(f"Recommendations are unavailable. {exc}")
 
     st.dataframe(
-        pd.DataFrame(
-            [_candidate_row(c, previews.get(c.member_id)) for c in candidates]
-        ),
+        pd.DataFrame([_candidate_row(c) for c in candidates]),
         hide_index=True,
         column_config={
             "Risk score": st.column_config.NumberColumn(
@@ -171,8 +150,10 @@ def _worklist(
             ),
         },
     )
-    eligible = tuple(c for c in candidates if c.selectable)
-    if not eligible or not previews_ready:
+    eligible = tuple(
+        c for c in candidates if c.selectable and c.recommendation_action is not None
+    )
+    if not eligible:
         return
 
     # Clear a draft when an intervening rerun changes the offered snapshots.
@@ -265,8 +246,7 @@ def main() -> None:
 
     try:
         _, rows = database_status(policy.db_path, DEFAULT_TABLE)
-        worklists = policy.worklists() if rows else None
-        cases = list_active_cases(policy.db_path) if rows else []
+        worklists, cases = policy.dashboard() if rows else (None, [])
     except (sqlite3.Error, ValueError):
         st.error(
             "The outreach database could not be read. Refresh outreach to try again."

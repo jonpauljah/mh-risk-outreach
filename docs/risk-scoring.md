@@ -176,9 +176,9 @@ finalize_operational_reassessment(pending_assessment_id, recommendation_rules=ru
 ```
 
 Use `OutreachPolicy.create_cases()` with entries selected from the manager's
-worklists. It generates the recommendation for a first case and reuses the
-current assessment's recommendation for a later case. The batch saves its
-baselines and cases together after rechecking eligibility and capacity.
+worklists. It uses the published cohort's recommendation for a first case
+and the current assessment's recommendation for a later case. The batch saves
+its baselines and cases together after rechecking eligibility and capacity.
 [Outreach eligibility and capacity](milestone-3/architecture-and-workflows.md#outreach-eligibility-and-capacity)
 
 ## Issue #16 historical design

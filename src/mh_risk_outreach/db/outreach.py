@@ -191,13 +191,17 @@ def get_case(
 def list_active_cases(db_path: str | Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
     """Return Pending and Accepted cases with their original assessment details."""
     with closing(_connect(db_path)) as conn:
-        return [
-            _case_details(row)
-            for row in conn.execute(
-                _CASE_DETAILS
-                + "WHERE c.status IN ('Pending', 'Accepted') ORDER BY c.case_id"
-            )
-        ]
+        return _list_active_cases(conn)
+
+
+def _list_active_cases(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        _case_details(row)
+        for row in conn.execute(
+            _CASE_DETAILS
+            + "WHERE c.status IN ('Pending', 'Accepted') ORDER BY c.case_id"
+        )
+    ]
 
 
 def _case_details(row: sqlite3.Row) -> dict[str, Any]:

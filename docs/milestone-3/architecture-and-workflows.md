@@ -94,8 +94,8 @@ the last scored result, and any current safety flags.
 ## NBA Recommendation Workflow
 
 Operational preview returns one action, reason, and rule version alongside the
-score. For a first case, the manager policy generates the recommendation from
-the saved `patients` snapshot. Reassessment finalization uses the pending
+score. Operational scoring prepares first-case recommendations from the
+saved `patients` snapshot. Reassessment finalization uses the pending
 snapshot and the same model run for scoring and recommendation. It archives
 the recommendation in the assessment, and later cases copy it from their
 originating assessment.
@@ -111,7 +111,8 @@ Safety Review shows that recommendation while the current assessment awaits scor
 Configure one shared `OutreachPolicy(capacity=K)` for the database. The Streamlit
 page reads `MH_RISK_OUTREACH_CAPACITY` at launch and defaults to 100.
 `worklists()` returns **Safety Review**, **Standard Outreach**, and the
-remaining standard slots. Both queues start with the held-out IDs. Safety
+remaining standard slots. The Streamlit page reads these and the Active Cases
+table in one SQLite transaction. Both queues start with the held-out IDs. Safety
 Review reads flags directly from the latest saved inputs and can surface an
 in-scope concern before a published score is available. A case linked to
 those inputs removes that snapshot from the queue. A newer flagged snapshot
@@ -135,9 +136,13 @@ standard cases fit within the available slots at validation time. Selected
 safety cases can take the total above K. `create_case(selection)` uses the
 same checks for a single case.
 
-For a first case, the service generates the recommendation from the imported
-inputs and saves a baseline from the published score. Later cases reuse the
-recommendation on the finalized assessment. Completing a case frees a slot.
+Operational scoring publishes first-case recommendations alongside the scores
+in `operational_recommendations`. Older publications fill and save missing
+recommendations as needed. The worklist keeps members with a saved
+recommendation selectable if another member's recommendation is unavailable.
+Case creation reuses the published score and recommendation to save the
+first-case baseline. Later cases reuse the recommendation on the finalized
+assessment. Completing a case frees a slot.
 Repeat standard outreach requires a newer qualifying manual assessment and
 continued eligibility. Read-only demo previews leave eligibility unchanged.
 The manager-selected flow requires the sponsor approval noted in #37.

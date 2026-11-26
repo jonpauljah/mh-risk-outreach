@@ -3,13 +3,14 @@
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from mh_risk_outreach import config, operational, outreach_policy
-from mh_risk_outreach.db.assessments import submit_reassessment
+from mh_risk_outreach.db.assessments import finalize_scoring, submit_reassessment
 from mh_risk_outreach.db.outreach import (
     accept_case,
     complete_case,
@@ -56,18 +57,22 @@ def scored_db(db_path, monkeypatch) -> str:
             ],
         )
 
-    def previews(member_ids, cohort_id, **kwargs):
-        inputs = records.set_index(config.MEMBER_ID)
+    monkeypatch.setattr(operational, "artifact_model_version", lambda *args: "v1")
+    monkeypatch.setattr(
+        operational,
+        "load_scoring_artifact",
+        lambda name, *args, version: SimpleNamespace(
+            model_name=name, model_version=version
+        ),
+    )
+
+    def compute(members, background, artifact):
         return {
-            member_id: recommend_action(inputs.loc[member_id].to_dict())
-            for member_id in member_ids
+            row[config.MEMBER_ID]: recommend_action(row)
+            for row in members.to_dict("records")
         }
 
-    def score_member(member_id, inputs, **kwargs):
-        return {**recommend_action(inputs), "rank_context": {"cohort_id": "cohort"}}
-
-    monkeypatch.setattr(operational, "recommend_operational_baselines", previews)
-    monkeypatch.setattr(outreach_policy, "score_operational_member", score_member)
+    monkeypatch.setattr(operational, "_compute_baseline_recommendations", compute)
     return db_path
 
 
@@ -241,3 +246,121 @@ def test_missing_current_scores_keep_safety_concerns_visible(scored_db):
     assert "--operational" in at.warning[0].value
     assert at.tabs[0].dataframe[0].value["Member ID"].tolist() == [7]
     assert not at.multiselect
+
+
+def test_failed_preview_leaves_finalized_recommendation_selectable(
+    scored_db, monkeypatch
+):
+    policy = outreach_policy.OutreachPolicy(2, db_path=scored_db)
+    first = policy.worklists().standard_outreach[0]
+    case_id = policy.create_case(first)
+    case = list_active_cases(scored_db)[0]
+    accept_case(case_id, scored_db, expected_action=case["recommended_action"])
+    record_case_outcome(case_id, "Reached — engaged", scored_db)
+    complete_case(case_id, scored_db, expected_outcome="Reached — engaged")
+    assessment_id = submit_reassessment(13, {"Feeling_Sad_Down": 9}, scored_db)
+    finalize_scoring(
+        assessment_id,
+        {
+            "risk_score": 98,
+            "band_level_priority": "Very High",
+            "rank_priority": 2,
+            "explanation": "Updated evidence",
+            "operational_model_name": "logistic_regression",
+            "model_version": "v1",
+            "rank_context": {"cohort_id": "cohort"},
+            "recommendation_action": "Behavioral-health resource review",
+            "recommendation_reason": "Reported feeling sad or down was 9.",
+            "recommendation_rule_version": "outreach-rules-v1",
+        },
+        scored_db,
+    )
+    with closing(sqlite3.connect(scored_db)) as conn, conn:
+        conn.execute(
+            """UPDATE operational_scores SET score_assessment_id = ?, safety_assessment_id = ?
+               WHERE Member_ID = 13""",
+            (assessment_id, assessment_id),
+        )
+
+    def fail_preview(members, background, artifact):
+        assert members[config.MEMBER_ID].tolist() == [16]
+        raise RuntimeError("Preview failed for this member.")
+
+    monkeypatch.setattr(operational, "_compute_baseline_recommendations", fail_preview)
+    at = _page().run()
+    standard = at.tabs[1]
+    status = standard.dataframe[0].value.set_index("Member ID")["Case creation"]
+    assert status.to_dict() == {13: "Eligible", 16: "Recommendation unavailable"}
+    assert standard.multiselect[0].options == ["13"]
+    standard.multiselect[0].set_value([13])
+    _button(standard, "Create Outreach Cases").click().run()
+    assert not at.exception
+    assert at.success[0].value == "Created one Pending case."
+    assert [case["assessment_id"] for case in list_active_cases(scored_db)] == [
+        assessment_id
+    ]
+
+
+def test_legacy_previews_only_score_new_members_and_submission_reuses_them(
+    scored_db, monkeypatch
+):
+    computed = []
+    original = operational._compute_baseline_recommendations
+
+    def track(members, background, artifact):
+        computed.append(sorted(members[config.MEMBER_ID]))
+        return original(members, background, artifact)
+
+    monkeypatch.setattr(operational, "_compute_baseline_recommendations", track)
+    at = _page().run()
+    assert computed == [[13, 16]]
+
+    with closing(sqlite3.connect(scored_db)) as conn, conn:
+        conn.execute(
+            "UPDATE operational_scores SET band_level_priority = 'Medium' WHERE Member_ID = 13"
+        )
+    _button(at, "Refresh outreach").click().run()
+    standard = at.tabs[1]
+    assert computed == [[13, 16], [21]]
+    assert standard.multiselect[0].options == ["16", "21"]
+    standard.multiselect[0].set_value([16, 21])
+    _button(standard, "Create Outreach Cases").click().run()
+
+    assert not at.exception
+    assert at.success[0].value == "Created 2 Pending cases."
+    assert computed == [[13, 16], [21]]
+
+
+def test_dashboard_reads_capacity_and_active_cases_in_one_snapshot(
+    scored_db, monkeypatch
+):
+    with closing(sqlite3.connect(scored_db)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+    policy = outreach_policy.OutreachPolicy(2, db_path=scored_db)
+    candidate = policy.worklists().standard_outreach[0]
+    original = outreach_policy.OutreachPolicy._worklists
+    wrote_case = False
+
+    def interleave_write(self, conn):
+        nonlocal wrote_case
+        snapshot = original(self, conn)
+        if not wrote_case:
+            wrote_case = True
+            policy.create_case(candidate)
+        return snapshot
+
+    monkeypatch.setattr(outreach_policy.OutreachPolicy, "_worklists", interleave_write)
+    at = _page().run()
+
+    assert not at.exception
+    assert len(list_active_cases(scored_db)) == 1
+    assert _metrics(at)["Active cases"] == "0"
+    assert _metrics(at)["Remaining standard slots"] == "2"
+    assert at.tabs[1].multiselect[0].options == ["13", "16"]
+    assert at.tabs[2].info[0].value == "There are no active outreach cases."
+
+    _button(at, "Refresh outreach").click().run()
+    assert _metrics(at)["Active cases"] == "1"
+    assert _metrics(at)["Remaining standard slots"] == "1"
+    assert at.tabs[1].multiselect[0].options == ["16"]
+    assert at.tabs[2].dataframe[0].value["Member ID"].tolist() == [13]

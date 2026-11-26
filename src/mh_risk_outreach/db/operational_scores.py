@@ -24,6 +24,7 @@ from mh_risk_outreach.db.operational_population import (
     require_operational_member,
 )
 from mh_risk_outreach.db.repository import init_schema
+from mh_risk_outreach.recommendations import Recommendation
 
 NO_WORKLIST = "no operational worklist; run scoring with --operational first"
 WRONG_POPULATION = (
@@ -145,6 +146,7 @@ def save_operational_scores(
     *,
     expected_inputs: list[AssessmentInputs],
     expected_cohort_id: str | None,
+    baseline_recommendations: dict[int, Recommendation] | None = None,
     reassessment: tuple[int, dict[str, object]] | None = None,
     validate_model: Callable[[], None] | None = None,
     db_path: str = DEFAULT_DB_PATH,
@@ -193,8 +195,34 @@ def save_operational_scores(
             _finalize_scoring(conn, *reassessment)
         conn.execute("DELETE FROM operational_scores")
         conn.executemany(statement, rows.itertuples(index=False, name=None))
+        if baseline_recommendations:
+            _save_baseline_recommendations(
+                conn, str(rows["cohort_id"].iat[0]), baseline_recommendations
+            )
         if validate_model is not None:
             validate_model()
+
+
+def _save_baseline_recommendations(
+    conn: sqlite3.Connection, cohort_id: str, recommendations: dict[int, Recommendation]
+) -> None:
+    conn.executemany(
+        """INSERT INTO operational_recommendations
+           (Member_ID, cohort_id, recommendation_action,
+            recommendation_reason, recommendation_rule_version)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (Member_ID, cohort_id) DO NOTHING""",
+        (
+            (
+                member_id,
+                cohort_id,
+                recommendation["recommendation_action"],
+                recommendation["recommendation_reason"],
+                recommendation["recommendation_rule_version"],
+            )
+            for member_id, recommendation in recommendations.items()
+        ),
+    )
 
 
 def load_operational_scores(db_path: str = DEFAULT_DB_PATH) -> pd.DataFrame:

@@ -240,3 +240,13 @@ CREATE TABLE IF NOT EXISTS operational_scores (
     FOREIGN KEY (safety_assessment_id, Member_ID)
       REFERENCES risk_assessments(assessment_id, Member_ID)
 );
+
+-- Recommendations for the published cohort's members without an assessment.
+CREATE TABLE IF NOT EXISTS operational_recommendations (
+    Member_ID INTEGER NOT NULL REFERENCES operational_scores(Member_ID) ON DELETE CASCADE,
+    cohort_id TEXT NOT NULL,
+    recommendation_action TEXT NOT NULL,
+    recommendation_reason TEXT NOT NULL,
+    recommendation_rule_version TEXT NOT NULL,
+    PRIMARY KEY (Member_ID, cohort_id)
+);
