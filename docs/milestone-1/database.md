@@ -30,9 +30,9 @@ recommendation action and reason, and recommendation rule version when
 available. Cases copy the original recommended action, reason, and applicable
 versions. Selected and accepted actions, override justification, status,
 outcome, and acceptance, outcome, and completion timestamps are separate case
-fields. `update_case_decision()` stores these manager-supplied fields subject
-to schema value and timestamp constraints; it does not implement transition
-policy.
+fields. `select_case_action()`, `accept_case()`, `record_case_outcome()`, and
+`complete_case()` enforce the [manager lifecycle](../milestone-3/architecture-and-workflows.md#case-lifecycle)
+using SQLite write transactions.
 
 Case creation reuses the current scored, unused assessment or creates the
 on-demand baseline inside the first-case transaction. For a reused assessment,
@@ -43,9 +43,9 @@ current assessment ID and the UTC time its pointer was last advanced.
 Each case references the assessment and member that opened it. A unique index
 prevents an assessment from being used twice, and a partial unique index allows
 only one Pending or Accepted case per member. Completed cases retain their
-outcome and completion timestamp and do not require a reassessment. Reassessment
-does not update a case. The persistence API creates Pending cases and stores
-history; manager status transitions remain a later lifecycle responsibility.
+outcome and completion timestamp. SQLite triggers protect completed cases
+from updates and enforce the permitted status transitions. Schema initialization
+adds the triggers to existing databases without rewriting case history.
 All new persistence connections enable SQLite foreign keys. SQLite checks JSON
 syntax; the assessment writer validates the 50 field names and value types.
 Member/current/case references are constrained by foreign keys.

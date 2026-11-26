@@ -174,6 +174,41 @@ ON outreach_cases
 BEGIN
     SELECT RAISE(ABORT, 'case origin and recommendation are immutable');
 END;
+CREATE TRIGGER IF NOT EXISTS trg_completed_case_immutable
+BEFORE UPDATE ON outreach_cases
+WHEN OLD.status = 'Completed'
+BEGIN
+    SELECT RAISE(ABORT, 'Completed cases cannot be edited');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_case_status_transition
+BEFORE UPDATE OF status ON outreach_cases
+WHEN NEW.status <> OLD.status AND NOT (
+    (OLD.status = 'Pending' AND NEW.status = 'Accepted' AND NEW.accepted_action IS NOT NULL)
+    OR (OLD.status = 'Accepted' AND NEW.status = 'Completed'
+        AND OLD.outcome IS NOT NULL AND OLD.outcome_recorded_at IS NOT NULL
+        AND NEW.outcome IS OLD.outcome AND NEW.outcome_recorded_at IS OLD.outcome_recorded_at)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid outreach case status transition');
+END;
+-- Install alongside the existing status trigger when opening older databases.
+CREATE TRIGGER IF NOT EXISTS trg_case_acceptance_decision
+BEFORE UPDATE OF status ON outreach_cases
+WHEN OLD.status = 'Pending' AND NEW.status = 'Accepted'
+BEGIN
+    SELECT RAISE(ABORT, 'clear any earlier outcome at acceptance')
+    WHERE NEW.outcome IS NOT NULL OR NEW.outcome_recorded_at IS NOT NULL;
+
+    -- SQLite's default trim removes only spaces. Match Python str.strip's whitespace.
+    SELECT RAISE(ABORT, 'an alternative action requires an override justification')
+    WHERE NEW.accepted_action <> OLD.recommended_action
+      AND (TYPEOF(NEW.override_justification) <> 'text'
+           OR TRIM(NEW.override_justification, CHAR(
+          9, 10, 11, 12, 13, 28, 29, 30, 31, 32, 133, 160, 5760,
+          8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202,
+          8232, 8233, 8239, 8287, 12288
+      )) = '');
+END;
 
 -- This pointer follows the latest submitted assessment, including one that
 -- still awaits scoring. Existing cases keep their original assessment_id.
