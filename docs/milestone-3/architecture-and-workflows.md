@@ -125,9 +125,15 @@ candidates by current model priority. Safety selections with a current score
 can exceed K. A pending assessment's safety flags remain visible while case
 creation awaits scoring and any prior active case's completion.
 
-Pass the selected entry to `OutreachPolicy.create_case(selection)`. It
-checks the current worklists again under the same SQLite write lock used to
-create the case. A stale selection requires refreshing the worklists.
+Pass the selected entries to `OutreachPolicy.create_cases(selections)`.
+The service rechecks every entry against one worklist snapshot under the
+SQLite write lock and returns case IDs in selection order. A stale or
+ineligible entry, a duplicate selection, or a failed write rolls back the
+whole batch, including its first-case baselines. In a mixed selection,
+standard cases fit within the available slots at validation time. Selected
+safety cases can take the total above K. `create_case(selection)` uses the
+same checks for a single case.
+
 For a first case, the service generates the recommendation from the imported
 inputs and saves a baseline from the published score. Later cases reuse the
 recommendation on the finalized assessment. Completing a case frees a slot.
@@ -144,18 +150,28 @@ remain visible in Safety Review while selection is unavailable. See the
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: manager selects eligible member
+    [*] --> Pending: commit selected members together
     Pending --> Accepted: accept action (override requires justification)
-    Accepted --> Completed: record outcome and complete manually
+    Accepted --> Accepted: save outcome
+    Accepted --> Completed: complete manually after saving outcome
 ```
 
-The planned policy retains the original recommendation, explanation and versions
-even when a manager selects an alternative, recording justification, accepted
-action and timestamps. Accepted cases record an outcome before completion;
-Completed cases remain in history and are excluded from active work. Completion
-does not update survey inputs or risk scores, and reassessment submission does
-not close a case. Open #45 stores these fields; enforcing all transitions and
-completed-case restrictions belongs to [#38](https://github.com/jonpauljah/mh-risk-outreach/issues/38).
+In `mh_risk_outreach.db.outreach`, `select_case_action()` saves a choice while
+the case is Pending. An alternative requires a nonblank justification.
+`accept_case()` saves the selected action or defaults to the recommendation.
+The original assessment link, recommendation, explanation, rule version, and
+model version stay available for comparison.
+
+`record_case_outcome()` saves one outcome while Accepted. The manager can
+correct it before completion. Supported values are **Not reached**,
+**Reached — declined**, **Reached — engaged**, and **Referral completed**.
+`complete_case()` requires a saved outcome and freezes that outcome and the
+other case decisions. SQLite stores UTC timestamps for acceptance, outcome
+recording, and completion. Invalid decisions leave the stored case unchanged.
+
+`list_active_cases()` returns Pending and Accepted cases. `list_member_history()`
+includes Completed cases after their capacity slots are released. Reassessment
+and case completion are independent operations.
 
 ## Streamlit Workflows
 

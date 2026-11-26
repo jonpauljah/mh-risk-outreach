@@ -174,6 +174,23 @@ ON outreach_cases
 BEGIN
     SELECT RAISE(ABORT, 'case origin and recommendation are immutable');
 END;
+CREATE TRIGGER IF NOT EXISTS trg_completed_case_immutable
+BEFORE UPDATE ON outreach_cases
+WHEN OLD.status = 'Completed'
+BEGIN
+    SELECT RAISE(ABORT, 'Completed cases cannot be edited');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_case_status_transition
+BEFORE UPDATE OF status ON outreach_cases
+WHEN NEW.status <> OLD.status AND NOT (
+    (OLD.status = 'Pending' AND NEW.status = 'Accepted' AND NEW.accepted_action IS NOT NULL)
+    OR (OLD.status = 'Accepted' AND NEW.status = 'Completed'
+        AND OLD.outcome IS NOT NULL AND OLD.outcome_recorded_at IS NOT NULL
+        AND NEW.outcome IS OLD.outcome AND NEW.outcome_recorded_at IS OLD.outcome_recorded_at)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid outreach case status transition');
+END;
 
 -- This pointer follows the latest submitted assessment, including one that
 -- still awaits scoring. Existing cases keep their original assessment_id.

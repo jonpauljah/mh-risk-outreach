@@ -5,6 +5,8 @@ The manager-facing policy lives in mh_risk_outreach.outreach_policy.
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,20 @@ from mh_risk_outreach.db.operational_scores import (
     assessment_score_payload,
     worklist_requires_refresh,
 )
+
+CASE_OUTCOMES = (
+    "Not reached",
+    "Reached — declined",
+    "Reached — engaged",
+    "Referral completed",
+)
+
+_CASE_DETAILS = """
+    SELECT c.*, a.source, a.created_at AS assessment_created_at,
+           a.scoring_status, a.risk_score, a.band_level_priority,
+           a.rank_priority, a.rank_context_json, a.explanation
+    FROM outreach_cases c JOIN risk_assessments a USING (assessment_id)
+"""
 
 
 def create_case(
@@ -167,66 +183,118 @@ def get_case(
     case_id: int, db_path: str | Path = DEFAULT_DB_PATH
 ) -> dict[str, Any] | None:
     """Load one outreach case and its original assessment."""
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            """SELECT c.*, a.source, a.created_at AS assessment_created_at,
-                      a.scoring_status, a.risk_score, a.band_level_priority,
-                      a.rank_priority, a.rank_context_json, a.explanation, a.model_version
-               FROM outreach_cases c JOIN risk_assessments a USING (assessment_id)
-               WHERE c.case_id=?""",
-            (case_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        result = dict(row)
-        # The schema permits pending assessments with SQL NULL scoring fields.
-        # Preserve that valid state when reading case history.
-        rank_context = result.pop("rank_context_json")
-        result["rank_context"] = (
-            json.loads(rank_context) if rank_context is not None else None
-        )
-        return result
-    finally:
-        conn.close()
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(_CASE_DETAILS + "WHERE c.case_id=?", (case_id,)).fetchone()
+        return _case_details(row) if row is not None else None
 
 
-def update_case_decision(
-    case_id: int,
-    updates: dict[str, Any],
-    db_path: str | Path = DEFAULT_DB_PATH,
-) -> None:
-    """Persist manager decision fields without implementing transition policy."""
-    # Field names are interpolated only after a fixed allowlist check. The
-    # values remain bound parameters, and the schema validates stored enums.
-    allowed = {
-        "status",
-        "outcome",
-        "selected_action",
-        "accepted_action",
-        "override_justification",
-        "accepted_at",
-        "outcome_recorded_at",
-        "completed_at",
-    }
-    if not updates or not set(updates).issubset(allowed):
-        raise ValueError(f"updates must use one or more of {sorted(allowed)}")
-    assignments = ", ".join(f"{column}=?" for column in updates)
-    conn = _connect(db_path)
-    try:
+def list_active_cases(db_path: str | Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    """Return Pending and Accepted cases with their original assessment details."""
+    with closing(_connect(db_path)) as conn:
+        return [
+            _case_details(row)
+            for row in conn.execute(
+                _CASE_DETAILS
+                + "WHERE c.status IN ('Pending', 'Accepted') ORDER BY c.case_id"
+            )
+        ]
+
+
+def _case_details(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    rank_context = result.pop("rank_context_json")
+    result["rank_context"] = (
+        json.loads(rank_context) if rank_context is not None else None
+    )
+    return result
+
+
+@contextmanager
+def _case_for_decision(
+    case_id: int, status: str, db_path: str | Path
+) -> Iterator[tuple[sqlite3.Connection, sqlite3.Row]]:
+    with closing(_connect(db_path)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
-        cur = conn.execute(
-            f"UPDATE outreach_cases SET {assignments} WHERE case_id=?",
-            (*updates.values(), case_id),
-        )
-        if cur.rowcount != 1:
+        case = conn.execute(
+            "SELECT * FROM outreach_cases WHERE case_id=?", (case_id,)
+        ).fetchone()
+        if case is None:
             raise ValueError(f"unknown case {case_id}")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        if case["status"] == "Completed":
+            raise ValueError("Completed cases cannot be edited")
+        if case["status"] != status:
+            raise ValueError(f"case must be {status} for this decision")
+        yield conn, case
+
+
+def _override_reason(
+    action: str, recommended: str, justification: str | None
+) -> str | None:
+    if action == recommended:
+        return None
+    if not isinstance(justification, str) or not justification.strip():
+        raise ValueError("an alternative action requires an override justification")
+    return justification.strip()
+
+
+def select_case_action(
+    case_id: int,
+    action: str,
+    db_path: str | Path = DEFAULT_DB_PATH,
+    *,
+    justification: str | None = None,
+) -> None:
+    """Save a Pending case's proposed manager action and any override reason."""
+    if not isinstance(action, str) or not action.strip():
+        raise ValueError("selected action is required")
+    action = action.strip()
+    with _case_for_decision(case_id, "Pending", db_path) as (conn, case):
+        reason = _override_reason(action, case["recommended_action"], justification)
+        conn.execute(
+            "UPDATE outreach_cases SET selected_action=?, override_justification=? WHERE case_id=?",
+            (action, reason, case_id),
+        )
+
+
+def accept_case(case_id: int, db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    """Accept the Pending case's selected action, defaulting to its recommendation."""
+    with _case_for_decision(case_id, "Pending", db_path) as (conn, case):
+        recommended = case["recommended_action"]
+        action = (
+            case["selected_action"]
+            if case["selected_action"] is not None
+            else recommended
+        )
+        reason = _override_reason(action, recommended, case["override_justification"])
+        conn.execute(
+            """UPDATE outreach_cases SET status='Accepted', selected_action=?,
+               accepted_action=?, override_justification=?, accepted_at=? WHERE case_id=?""",
+            (action, action, reason, _now(), case_id),
+        )
+
+
+def record_case_outcome(
+    case_id: int, outcome: str, db_path: str | Path = DEFAULT_DB_PATH
+) -> None:
+    """Save the current outcome of an Accepted case."""
+    if outcome not in CASE_OUTCOMES:
+        raise ValueError("unsupported outreach outcome")
+    with _case_for_decision(case_id, "Accepted", db_path) as (conn, _):
+        conn.execute(
+            "UPDATE outreach_cases SET outcome=?, outcome_recorded_at=? WHERE case_id=?",
+            (outcome, _now(), case_id),
+        )
+
+
+def complete_case(case_id: int, db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    """Complete an Accepted case after an outcome has been recorded."""
+    with _case_for_decision(case_id, "Accepted", db_path) as (conn, case):
+        if case["outcome"] is None or case["outcome_recorded_at"] is None:
+            raise ValueError("record an outcome before completing the case")
+        conn.execute(
+            "UPDATE outreach_cases SET status='Completed', completed_at=? WHERE case_id=?",
+            (_now(), case_id),
+        )
 
 
 def list_member_history(

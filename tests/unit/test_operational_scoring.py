@@ -32,10 +32,12 @@ from mh_risk_outreach.db.operational_scores import (
     load_operational_scores,
 )
 from mh_risk_outreach.db.outreach import (
+    accept_case,
+    complete_case,
     create_case,
     get_case,
     list_member_history,
-    update_case_decision,
+    record_case_outcome,
 )
 from mh_risk_outreach.db.repository import load_from_db, save_records
 from mh_risk_outreach.models.train import run as train
@@ -232,17 +234,9 @@ def test_policy_uses_published_scores_and_finalized_recommendations(setup_scorin
     )
     assert pending.pending_scoring and not pending.selectable
     finalize_operational_reassessment(assessment_id, **paths)
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "accepted_at": "2026-11-16T11:15:00+00:00",
-            "outcome": "Reached — engaged",
-            "outcome_recorded_at": "2026-11-16T11:30:00+00:00",
-            "completed_at": "2026-11-16T12:00:00+00:00",
-        },
-        db,
-    )
+    accept_case(case_id, db)
+    record_case_outcome(case_id, "Reached — engaged", db)
+    complete_case(case_id, db)
     no_standard_slots = replace(policy, capacity=0)
     concern = next(
         c
@@ -308,18 +302,9 @@ def test_candidate_is_read_only_and_snapshots_survive_refresh(
     )
     for field in RECOMMENDATION_FIELDS:
         assert baseline[field] == baseline_score[field]
-    completed_at = get_case(case_id, db)["created_at"]
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "outcome": "Reached — engaged",
-            "outcome_recorded_at": completed_at,
-            "accepted_at": completed_at,
-            "completed_at": completed_at,
-        },
-        db,
-    )
+    accept_case(case_id, db)
+    record_case_outcome(case_id, "Reached — engaged", db)
+    complete_case(case_id, db)
     original_case = get_case(case_id, db)
     with pytest.raises(ValueError, match="already been used"):
         create_case(member, baseline_action, db_path=db)

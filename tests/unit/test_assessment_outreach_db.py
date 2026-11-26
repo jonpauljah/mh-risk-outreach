@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from contextlib import closing
 
 import pandas as pd
 import pytest
@@ -14,10 +15,14 @@ from mh_risk_outreach.db.assessments import (
     submit_reassessment,
 )
 from mh_risk_outreach.db.outreach import (
+    accept_case,
+    complete_case,
     create_case,
     get_case,
+    list_active_cases,
     list_member_history,
-    update_case_decision,
+    record_case_outcome,
+    select_case_action,
 )
 from mh_risk_outreach.db.repository import init_schema, save_records
 from mh_risk_outreach.db.scores import save_member_scores
@@ -134,28 +139,12 @@ def test_on_demand_baseline_and_reassessments_preserve_case(database):
     finalize_scoring(pending_id, score(), path)
     with pytest.raises(ValueError, match="already finalized"):
         finalize_scoring(pending_id, score(), path)
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "UPDATE outreach_cases SET status='Accepted', accepted_at='2026-11-16T11:00:00+00:00' WHERE case_id=?",
-        (case_id,),
-    )
-    conn.commit()
-    conn.close()
+    accept_case(case_id, path)
     accepted_reassessment = submit_reassessment(7, {}, path)
     assert get_case(case_id, path)["status"] == "Accepted"
     assert get_case(case_id, path)["assessment_id"] == baseline_id
     finalize_scoring(accepted_reassessment, score(), path)
 
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "outcome": "Reached — engaged",
-            "outcome_recorded_at": "2026-11-16T11:30:00+00:00",
-            "completed_at": "2026-11-16T12:00:00+00:00",
-        },
-        path,
-    )
     conn = sqlite3.connect(path)
     with pytest.raises(sqlite3.IntegrityError, match="scored assessment is immutable"):
         conn.execute(
@@ -169,6 +158,8 @@ def test_on_demand_baseline_and_reassessments_preserve_case(database):
         )
     conn.rollback()
     conn.close()
+    record_case_outcome(case_id, "Reached — engaged", path)
+    complete_case(case_id, path)
     second_id = submit_reassessment(
         7, {}, path
     )  # unchanged submission is still distinct
@@ -260,21 +251,9 @@ def test_reimport_and_score_replacement_preserve_history(database):
 def test_completion_without_reassessment_and_constraints(database):
     path, _ = database
     case_id = create_case(7, "Contact", score(), path)
-    update_case_decision(
-        case_id,
-        {"status": "Accepted", "accepted_at": "2026-11-16T10:00:00+00:00"},
-        path,
-    )
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "outcome": "Not reached",
-            "outcome_recorded_at": "2026-11-16T11:00:00+00:00",
-            "completed_at": "2026-11-16T12:00:00+00:00",
-        },
-        path,
-    )
+    accept_case(case_id, path)
+    record_case_outcome(case_id, "Not reached", path)
+    complete_case(case_id, path)
     assert get_case(case_id, path)["status"] == "Completed"
     assert len(list_member_history(7, path)["assessments"]) == 1
 
@@ -299,24 +278,161 @@ def test_completion_without_reassessment_and_constraints(database):
         create_case(7, "Contact", score(), path)
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    ["Not reached", "Reached — declined", "Reached — engaged", "Referral completed"],
+)
+def test_case_lifecycle_preserves_agreed_action_and_final_outcome(database, outcome):
+    path, _ = database
+    case_id = create_case(
+        7,
+        "Contact",
+        score(
+            recommendation_reason="Original reason", recommendation_rule_version="v2"
+        ),
+        path,
+    )
+    pending = get_case(case_id, path)
+    assert list_active_cases(path) == [pending]
+    for reason in (None, " \t\n"):
+        with pytest.raises(ValueError, match="override justification"):
+            select_case_action(case_id, "Alternative", path, justification=reason)
+        assert get_case(case_id, path) == pending
+    with pytest.raises(ValueError, match="must be Accepted"):
+        record_case_outcome(case_id, outcome, path)
+    with pytest.raises(ValueError, match="must be Accepted"):
+        complete_case(case_id, path)
+    assert get_case(case_id, path) == pending
+
+    select_case_action(case_id, "Alternative", path, justification=" Manager reason ")
+    assert get_case(case_id, path)["status"] == "Pending"
+    accept_case(case_id, path)
+    accepted = get_case(case_id, path)
+    assert accepted["status"] == "Accepted"
+    assert accepted["selected_action"] == accepted["accepted_action"] == "Alternative"
+    assert accepted["override_justification"] == "Manager reason"
+    assert accepted["outcome"] is None
+    assert list_active_cases(path) == [accepted]
+    with pytest.raises(ValueError, match="record an outcome"):
+        complete_case(case_id, path)
+    with pytest.raises(ValueError, match="must be Pending"):
+        select_case_action(case_id, "Contact", path)
+    with pytest.raises(ValueError, match="must be Pending"):
+        accept_case(case_id, path)
+    with pytest.raises(ValueError, match="unsupported outreach outcome"):
+        record_case_outcome(case_id, "Unknown", path)
+    assert get_case(case_id, path) == accepted
+
+    record_case_outcome(case_id, "Not reached", path)
+    record_case_outcome(case_id, outcome, path)
+    recorded = get_case(case_id, path)
+    assert recorded["status"] == "Accepted"
+    assert recorded["outcome"] == outcome
+    complete_case(case_id, path)
+    completed = get_case(case_id, path)
+    assert completed["status"] == "Completed"
+    assert completed["outcome"] == outcome
+    assert completed["outcome_recorded_at"] == recorded["outcome_recorded_at"]
+    assert completed["accepted_at"] == accepted["accepted_at"]
+    assert (
+        completed["created_at"]
+        <= completed["accepted_at"]
+        <= completed["outcome_recorded_at"]
+        <= completed["completed_at"]
+    )
+    for field in (
+        "assessment_id",
+        "recommended_action",
+        "recommendation_reason",
+        "explanation",
+        "recommendation_rule_version",
+        "model_version",
+    ):
+        assert completed[field] == pending[field]
+    assert list_active_cases(path) == []
+    assert list_member_history(7, path)["cases"] == [completed]
+
+    for edit in (
+        lambda: select_case_action(case_id, "Contact", path),
+        lambda: accept_case(case_id, path),
+        lambda: record_case_outcome(case_id, "Not reached", path),
+        lambda: complete_case(case_id, path),
+    ):
+        with pytest.raises(ValueError, match="Completed cases cannot be edited"):
+            edit()
+        assert get_case(case_id, path) == completed
+
+
+def test_pending_action_can_revert_to_original_before_acceptance(database):
+    path, _ = database
+    case_id = create_case(7, "Contact", score(), path)
+    select_case_action(case_id, "Alternative", path, justification="Manager reason")
+    select_case_action(case_id, "Contact", path)
+    accept_case(case_id, path)
+    accepted = get_case(case_id, path)
+    assert accepted["selected_action"] == accepted["accepted_action"] == "Contact"
+    assert accepted["override_justification"] is None
+
+
+def test_sqlite_rejects_skipping_status_and_editing_completed_case(database):
+    path, _ = database
+    case_id = create_case(7, "Contact", score(), path)
+    close_with_outcome = """UPDATE outreach_cases SET status='Completed',
+        accepted_at='2026-11-16T10:00:00+00:00', outcome='Not reached',
+        outcome_recorded_at='2026-11-16T11:00:00+00:00', completed_at='2026-11-16T12:00:00+00:00'
+        WHERE case_id=?"""
+    with (
+        closing(sqlite3.connect(path)) as conn,
+        conn,
+        pytest.raises(sqlite3.IntegrityError, match="invalid outreach case status"),
+    ):
+        conn.execute(close_with_outcome, (case_id,))
+    accept_case(case_id, path)
+    with (
+        closing(sqlite3.connect(path)) as conn,
+        conn,
+        pytest.raises(sqlite3.IntegrityError, match="invalid outreach case status"),
+    ):
+        conn.execute(close_with_outcome, (case_id,))
+    record_case_outcome(case_id, "Reached — engaged", path)
+    complete_case(case_id, path)
+    with (
+        closing(sqlite3.connect(path)) as conn,
+        conn,
+        pytest.raises(sqlite3.IntegrityError, match="Completed cases cannot be edited"),
+    ):
+        conn.execute(
+            "UPDATE outreach_cases SET outcome='Not reached' WHERE case_id=?",
+            (case_id,),
+        )
+    assert get_case(case_id, path)["outcome"] == "Reached — engaged"
+
+
+def test_legacy_accepted_case_remains_readable_and_can_complete(database):
+    path, _ = database
+    case_id = create_case(7, "Contact", score(), path)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DROP TRIGGER trg_case_status_transition")
+        conn.execute(
+            "UPDATE outreach_cases SET status='Accepted', accepted_at='2026-11-16T10:00:00+00:00' WHERE case_id=?",
+            (case_id,),
+        )
+    accepted = get_case(case_id, path)
+    assert accepted["accepted_action"] is None
+    assert list_active_cases(path) == [accepted]
+    record_case_outcome(case_id, "Not reached", path)
+    complete_case(case_id, path)
+    completed = get_case(case_id, path)
+    assert completed["status"] == "Completed"
+    assert completed["accepted_at"] == accepted["accepted_at"]
+
+
 def test_case_requires_scored_snapshot_recommendation(database):
     path, _ = database
     case_id = create_case(7, "Contact", score(), path)
-    update_case_decision(
-        case_id,
-        {"status": "Accepted", "accepted_at": "2026-11-16T10:00:00+00:00"},
-        path,
-    )
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "outcome": "Not reached",
-            "outcome_recorded_at": "2026-11-16T11:00:00+00:00",
-            "completed_at": "2026-11-16T12:00:00+00:00",
-        },
-        path,
-    )
+    accept_case(case_id, path)
+    record_case_outcome(case_id, "Not reached", path)
+    complete_case(case_id, path)
     pending = submit_reassessment(7, {}, path)
     score_without_recommendation = score()
     score_without_recommendation.pop("recommendation")

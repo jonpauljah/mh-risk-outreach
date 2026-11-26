@@ -18,9 +18,12 @@ from mh_risk_outreach.config import (
 )
 from mh_risk_outreach.db.assessments import finalize_scoring, submit_reassessment
 from mh_risk_outreach.db.outreach import (
+    accept_case,
+    complete_case,
     get_case,
+    list_active_cases,
     list_member_history,
-    update_case_decision,
+    record_case_outcome,
 )
 from mh_risk_outreach.db.repository import save_records
 from mh_risk_outreach.outreach_policy import OutreachCandidate, OutreachPolicy
@@ -62,17 +65,102 @@ def policy(tmp_path, monkeypatch):
 
 
 def complete(case_id, db_path):
-    update_case_decision(
-        case_id,
-        {
-            "status": "Completed",
-            "accepted_at": "2026-11-16T11:15:00+00:00",
-            "outcome": "Reached — engaged",
-            "outcome_recorded_at": "2026-11-16T11:30:00+00:00",
-            "completed_at": "2026-11-16T12:00:00+00:00",
-        },
-        db_path,
+    accept_case(case_id, db_path)
+    record_case_outcome(case_id, "Reached — engaged", db_path)
+    complete_case(case_id, db_path)
+
+
+def test_bulk_selection_creates_only_selected_cases_and_honors_safety_exception(policy):
+    worklists = policy.worklists()
+    first, second = worklists.standard_outreach
+    (safety,) = worklists.safety_review
+    assert policy.create_cases([]) == []
+    with pytest.raises(ValueError, match="only once"):
+        policy.create_cases([first, first])
+    assert list_active_cases(policy.db_path) == []
+
+    selected = (safety, second, first)
+    case_ids = policy.create_cases(iter(selected))
+    cases = list_active_cases(policy.db_path)
+    assert [case["case_id"] for case in cases] == case_ids
+    assert [case["Member_ID"] for case in cases] == [c.member_id for c in selected]
+    assert all(
+        case["status"] == "Pending" and case["outcome"] is None for case in cases
     )
+    assert list_member_history(21, policy.db_path) == {"cases": [], "assessments": []}
+    assert policy.worklists().active_cases == 3
+    assert policy.worklists().standard_slots == 0
+
+    wider = replace(policy, capacity=10)
+    with pytest.raises(ValueError, match="no longer eligible"):
+        wider.create_cases([first, wider.worklists().standard_outreach[0]])
+    assert list_active_cases(policy.db_path) == cases
+
+
+def test_bulk_selection_rolls_back_earlier_cases_and_baselines_on_insert_failure(
+    policy,
+):
+    first, second = policy.worklists().standard_outreach
+    with closing(sqlite3.connect(policy.db_path)) as conn, conn:
+        conn.execute(
+            f"""CREATE TRIGGER fail_second_case BEFORE INSERT ON outreach_cases
+                WHEN NEW.Member_ID = {second.member_id}
+                BEGIN SELECT RAISE(ABORT, 'second case failed'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="second case failed"):
+        policy.create_cases([first, second])
+
+    with closing(sqlite3.connect(policy.db_path)) as conn:
+        for table in ("outreach_cases", "risk_assessments", "member_assessment_state"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert policy.worklists().standard_outreach == (first, second)
+
+
+def test_bulk_selection_rechecks_every_candidate_after_recommendation(
+    policy, monkeypatch
+):
+    first, second = policy.worklists().standard_outreach
+    original = outreach_policy.score_operational_member
+
+    def preview(member_id, inputs, **kwargs):
+        if member_id == second.member_id:
+            with closing(sqlite3.connect(policy.db_path)) as conn, conn:
+                conn.execute(
+                    "UPDATE operational_scores SET band_level_priority='Medium' WHERE Member_ID=?",
+                    (member_id,),
+                )
+        return original(member_id, inputs, **kwargs)
+
+    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    with pytest.raises(ValueError, match="no longer eligible"):
+        policy.create_cases([first, second])
+    assert list_active_cases(policy.db_path) == []
+    assert list_member_history(first.member_id, policy.db_path) == {
+        "cases": [],
+        "assessments": [],
+    }
+
+
+def test_bulk_selection_rechecks_shared_capacity_after_recommendation(
+    policy, monkeypatch
+):
+    worklists = policy.worklists()
+    first, second = worklists.standard_outreach
+    (safety,) = worklists.safety_review
+    original = outreach_policy.score_operational_member
+
+    def preview(member_id, inputs, **kwargs):
+        if member_id == second.member_id:
+            policy.create_case(safety)
+        return original(member_id, inputs, **kwargs)
+
+    monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
+    with pytest.raises(ValueError, match="at capacity"):
+        policy.create_cases([first, second])
+    assert [case["Member_ID"] for case in list_active_cases(policy.db_path)] == [
+        safety.member_id
+    ]
+    assert policy.worklists().standard_slots == 1
 
 
 def test_worklists_and_safety_exception_use_shared_capacity(policy):
@@ -88,11 +176,7 @@ def test_worklists_and_safety_exception_use_shared_capacity(policy):
 
     standard_id = policy.create_case(first.standard_outreach[0])
     assert [c.member_id for c in policy.worklists().standard_outreach] == [16]
-    update_case_decision(
-        standard_id,
-        {"status": "Accepted", "accepted_at": "2026-11-16T11:15:00+00:00"},
-        policy.db_path,
-    )
+    accept_case(standard_id, policy.db_path)
     other_id = policy.create_case(first.standard_outreach[1])
     with pytest.raises(ValueError, match="at capacity"):
         policy.create_case(first.standard_outreach[1])

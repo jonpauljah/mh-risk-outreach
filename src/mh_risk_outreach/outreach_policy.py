@@ -1,6 +1,7 @@
 """Build manager worklists and enforce outreach eligibility when selected."""
 
 import json
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from sqlite3 import Connection
@@ -172,65 +173,99 @@ class OutreachPolicy:
         )
 
     def create_case(self, selection: OutreachCandidate) -> int:
-        """Create a selected case after rechecking the policy under a write lock."""
-        baseline = None
-        if selection.assessment_id is None:
-            # Calculate SHAP evidence outside the write transaction. Use only
-            # persisted survey inputs and verify the cohort again before writing.
+        """Create a single case using the same policy as a bulk selection."""
+        return self.create_cases((selection,))[0]
+
+    def create_cases(self, selections: Iterable[OutreachCandidate]) -> list[int]:
+        """Atomically create Pending cases and return IDs in selection order."""
+        selected = tuple(selections)
+        if not selected:
+            return []
+        if len({candidate.member_id for candidate in selected}) != len(selected):
+            raise ValueError("a member can be selected only once")
+
+        first_cases = [
+            candidate for candidate in selected if candidate.assessment_id is None
+        ]
+        baselines = {}
+        if first_cases:
+            # Calculate recommendations outside the write transaction, with
+            # imported inputs from the same snapshot as the eligibility check.
             with closing(_connect(self.db_path)) as conn, conn:
                 conn.execute("BEGIN")
-                self._require_selection(conn, selection)
-                member = conn.execute(
-                    "SELECT * FROM patients WHERE Member_ID=?", (selection.member_id,)
-                ).fetchone()
-                inputs = {name: member[name] for name in FEATURES}
-            baseline = score_operational_member(
-                selection.member_id,
-                inputs,
-                db_path=self.db_path,
-                artifacts_dir=self.artifacts_dir,
-            )
-            context = baseline["rank_context"]
-            if (
-                not isinstance(context, dict)
-                or context.get("cohort_id") != selection.cohort_id
-            ):
-                raise ValueError(
-                    "operational scoring changed; refresh the outreach worklists"
+                self._require_selections(conn, selected)
+                inputs_by_member = {}
+                for candidate in first_cases:
+                    member = conn.execute(
+                        "SELECT * FROM patients WHERE Member_ID=?",
+                        (candidate.member_id,),
+                    ).fetchone()
+                    inputs_by_member[candidate.member_id] = {
+                        name: member[name] for name in FEATURES
+                    }
+            for candidate in first_cases:
+                baseline = score_operational_member(
+                    candidate.member_id,
+                    inputs_by_member[candidate.member_id],
+                    db_path=self.db_path,
+                    artifacts_dir=self.artifacts_dir,
                 )
+                context = baseline["rank_context"]
+                if (
+                    not isinstance(context, dict)
+                    or context.get("cohort_id") != candidate.cohort_id
+                ):
+                    raise ValueError(
+                        "operational scoring changed; refresh the outreach worklists"
+                    )
+                baselines[candidate.member_id] = baseline
 
         with closing(_connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_selection(conn, selection)
-            if baseline is not None:
-                return _create_case(
-                    conn,
-                    selection.member_id,
-                    str(baseline["recommendation_action"]),
-                    recommendation_reason=str(baseline["recommendation_reason"]),
-                    recommendation_rule_version=str(
-                        baseline["recommendation_rule_version"]
-                    ),
+            self._require_selections(conn, selected)
+            return [
+                self._persist_selection(
+                    conn, candidate, baselines.get(candidate.member_id)
                 )
-            action = conn.execute(
-                "SELECT recommendation_action FROM risk_assessments WHERE assessment_id=?",
-                (selection.assessment_id,),
-            ).fetchone()[0]
-            return _create_case(conn, selection.member_id, action)
+                for candidate in selected
+            ]
 
-    def _require_selection(
-        self, conn: Connection, selection: OutreachCandidate
+    @staticmethod
+    def _persist_selection(
+        conn: Connection,
+        selection: OutreachCandidate,
+        baseline: dict[str, object] | None,
+    ) -> int:
+        if baseline is not None:
+            return _create_case(
+                conn,
+                selection.member_id,
+                str(baseline["recommendation_action"]),
+                recommendation_reason=str(baseline["recommendation_reason"]),
+                recommendation_rule_version=str(
+                    baseline["recommendation_rule_version"]
+                ),
+            )
+        action = conn.execute(
+            "SELECT recommendation_action FROM risk_assessments WHERE assessment_id=?",
+            (selection.assessment_id,),
+        ).fetchone()[0]
+        return _create_case(conn, selection.member_id, action)
+
+    def _require_selections(
+        self, conn: Connection, selections: tuple[OutreachCandidate, ...]
     ) -> None:
         worklists = self._worklists(conn)
         if worklists.requires_score_refresh:
             raise ValueError(WRONG_POPULATION)
-        if selection.safety_flags:
-            candidates = worklists.safety_review
-        else:
-            if worklists.standard_slots == 0:
-                raise ValueError("standard outreach is at capacity")
-            candidates = worklists.standard_outreach
-        if not selection.selectable or selection not in candidates:
+        standard_count = sum(not selection.safety_flags for selection in selections)
+        if standard_count > worklists.standard_slots:
+            raise ValueError("standard outreach is at capacity")
+        selectable = set(worklists.standard_outreach)
+        selectable.update(
+            candidate for candidate in worklists.safety_review if candidate.selectable
+        )
+        if any(selection not in selectable for selection in selections):
             raise ValueError(
                 "selection is no longer eligible; refresh the outreach worklists"
             )

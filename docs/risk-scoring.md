@@ -175,18 +175,11 @@ rules = replace(
 finalize_operational_reassessment(pending_assessment_id, recommendation_rules=rules)
 ```
 
-For a first case a manager has chosen to create, use the complete imported
-survey snapshot to generate the score and recommendation. Pass that payload
-to `create_case` so the baseline and case capture the same recommendation.
-For a later case, pass the stored action from the current scored assessment.
-
-```python
-from mh_risk_outreach.db.outreach import create_case
-from mh_risk_outreach.operational import score_operational_member
-
-result = score_operational_member(member_id, imported_inputs)
-create_case(member_id, str(result["recommendation_action"]), scoring=result)
-```
+Use `OutreachPolicy.create_cases()` with entries selected from the manager's
+worklists. It generates the recommendation for a first case and reuses the
+current assessment's recommendation for a later case. The batch saves its
+baselines and cases together after rechecking eligibility and capacity.
+[Outreach eligibility and capacity](milestone-3/architecture-and-workflows.md#outreach-eligibility-and-capacity)
 
 ## Issue #16 historical design
 
