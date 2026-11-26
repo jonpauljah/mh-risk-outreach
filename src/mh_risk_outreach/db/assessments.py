@@ -221,38 +221,44 @@ def finalize_scoring(
     conn = _connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        # Only the latest pending assessment may transition to Scored. A trigger
-        # prevents subsequent edits to any finalized scoring snapshot.
-        cur = conn.execute(
-            """UPDATE risk_assessments SET scoring_status='Scored', risk_score=?,
-               band_level_priority=?, rank_priority=?, rank_context_json=?, explanation=?,
-               recommendation_action=?, recommendation_reason=?, recommendation_rule_version=?,
-               operational_model_name=?, model_version=?, scored_at=?
-               WHERE assessment_id=? AND scoring_status='PendingScoring'
-               AND assessment_id=(SELECT assessment_id FROM member_assessment_state WHERE Member_ID=risk_assessments.Member_ID)""",
-            (
-                result["risk_score"],
-                result["band_level_priority"],
-                result["rank_priority"],
-                json.dumps(result["rank_context"], sort_keys=True),
-                result["explanation"],
-                result.get("recommendation_action", result.get("recommendation")),
-                result.get("recommendation_reason"),
-                result.get("recommendation_rule_version"),
-                result.get("operational_model_name"),
-                result["model_version"],
-                _now(),
-                assessment_id,
-            ),
-        )
-        if cur.rowcount != 1:
-            raise ValueError("assessment is absent, not current, or already finalized")
+        _finalize_scoring(conn, assessment_id, result)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def _finalize_scoring(
+    conn: sqlite3.Connection, assessment_id: int, result: dict[str, Any]
+) -> None:
+    # Only the latest pending assessment may transition to Scored. A trigger
+    # prevents subsequent edits to any finalized scoring snapshot.
+    cur = conn.execute(
+        """UPDATE risk_assessments SET scoring_status='Scored', risk_score=?,
+           band_level_priority=?, rank_priority=?, rank_context_json=?, explanation=?,
+           recommendation_action=?, recommendation_reason=?, recommendation_rule_version=?,
+           operational_model_name=?, model_version=?, scored_at=?
+           WHERE assessment_id=? AND scoring_status='PendingScoring'
+           AND assessment_id=(SELECT assessment_id FROM member_assessment_state WHERE Member_ID=risk_assessments.Member_ID)""",
+        (
+            result["risk_score"],
+            result["band_level_priority"],
+            result["rank_priority"],
+            json.dumps(result["rank_context"], sort_keys=True),
+            result["explanation"],
+            result.get("recommendation_action", result.get("recommendation")),
+            result.get("recommendation_reason"),
+            result.get("recommendation_rule_version"),
+            result.get("operational_model_name"),
+            result["model_version"],
+            _now(),
+            assessment_id,
+        ),
+    )
+    if cur.rowcount != 1:
+        raise ValueError("assessment is absent, not current, or already finalized")
 
 
 def get_assessment(

@@ -1,13 +1,17 @@
 """Store the replaceable full-population worklist independently of history."""
 
+from __future__ import annotations
+
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pandas as pd
 
-from mh_risk_outreach.config import DEFAULT_DB_PATH
+from mh_risk_outreach.config import DEFAULT_DB_PATH, OPERATIONAL_SCOPE, RANK_ORDER
+from mh_risk_outreach.db.assessments import _finalize_scoring, _validate_scoring
 from mh_risk_outreach.db.repository import init_schema
 
 
@@ -36,14 +40,51 @@ def _assessment_inputs(conn: sqlite3.Connection) -> list[AssessmentInputs]:
     return [AssessmentInputs(*row) for row in rows]
 
 
-def _published_cohort_id(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute("SELECT cohort_id FROM operational_scores LIMIT 1").fetchone()
-    return str(row[0]) if row is not None else None
+class PublishedCohort(NamedTuple):
+    cohort_id: str
+    model_name: str
+    model_version: str
+
+
+def _published_cohort(conn: sqlite3.Connection) -> PublishedCohort | None:
+    row = conn.execute(
+        "SELECT cohort_id, operational_model_name, model_version "
+        "FROM operational_scores LIMIT 1"
+    ).fetchone()
+    return PublishedCohort(*row) if row is not None else None
+
+
+def assessment_score_payload(
+    row: sqlite3.Row | pd.Series[Any],
+    *,
+    cohort_id: str,
+    cohort_calculated_at: str,
+    cohort_size: int,
+    calculated_at: str | None = None,
+) -> dict[str, object]:
+    """Build the history payload for a published row or a candidate rank."""
+    return {
+        "risk_score": float(row["risk_score"]),
+        "band_level_priority": str(row["band_level_priority"]),
+        "rank_priority": int(row["rank_priority"]),
+        "explanation": str(row["reasoning"]),
+        "operational_model_name": str(row["operational_model_name"]),
+        "model_version": str(row["model_version"]),
+        "rank_context": {
+            "cohort_id": cohort_id,
+            "cohort_calculated_at": cohort_calculated_at,
+            "calculated_at": calculated_at or cohort_calculated_at,
+            "scope": OPERATIONAL_SCOPE,
+            "cohort_size": cohort_size,
+            "safety_review_required": bool(row["safety_review_required"]),
+            "ordering": list(RANK_ORDER),
+        },
+    }
 
 
 def load_operational_inputs(
     db_path: str = DEFAULT_DB_PATH,
-) -> tuple[pd.DataFrame, list[AssessmentInputs], str | None]:
+) -> tuple[pd.DataFrame, list[AssessmentInputs], PublishedCohort | None]:
     """Read imported inputs, assessment provenance, and the current cohort together."""
     if not Path(db_path).is_file():
         raise ValueError(
@@ -53,7 +94,7 @@ def load_operational_inputs(
         init_schema(conn)
         conn.execute("BEGIN")
         patients = pd.read_sql_query("SELECT * FROM patients ORDER BY Member_ID", conn)
-        return patients, _assessment_inputs(conn), _published_cohort_id(conn)
+        return patients, _assessment_inputs(conn), _published_cohort(conn)
 
 
 def save_operational_scores(
@@ -61,9 +102,13 @@ def save_operational_scores(
     *,
     expected_inputs: list[AssessmentInputs],
     expected_cohort_id: str | None,
+    reassessment: tuple[int, dict[str, object]] | None = None,
+    validate_model: Callable[[], None] | None = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> None:
-    """Publish the worklist if the assessments and published cohort are unchanged."""
+    """Publish the worklist and optionally finalize its pending assessment."""
+    if reassessment is not None:
+        _validate_scoring(reassessment[1])
     columns = (
         "Member_ID",
         "operational_model_name",
@@ -93,12 +138,17 @@ def save_operational_scores(
             raise ValueError(
                 "assessment inputs changed during scoring; run scoring again"
             )
-        if _published_cohort_id(conn) != expected_cohort_id:
+        cohort = _published_cohort(conn)
+        if (cohort.cohort_id if cohort else None) != expected_cohort_id:
             raise ValueError(
                 "operational worklist changed during scoring; run scoring again"
             )
+        if reassessment is not None:
+            _finalize_scoring(conn, *reassessment)
         conn.execute("DELETE FROM operational_scores")
         conn.executemany(statement, rows.itertuples(index=False, name=None))
+        if validate_model is not None:
+            validate_model()
 
 
 def load_operational_scores(db_path: str = DEFAULT_DB_PATH) -> pd.DataFrame:

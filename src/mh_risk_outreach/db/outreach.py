@@ -9,6 +9,7 @@ from typing import Any
 
 from mh_risk_outreach.config import DEFAULT_DB_PATH, FEATURES
 from mh_risk_outreach.db.assessments import _connect, _insert_assessment, _now
+from mh_risk_outreach.db.operational_scores import assessment_score_payload
 
 
 def create_case(
@@ -16,6 +17,9 @@ def create_case(
     recommendation: str,
     scoring: dict[str, Any] | None = None,
     db_path: str | Path = DEFAULT_DB_PATH,
+    *,
+    recommendation_reason: str | None = None,
+    recommendation_rule_version: str | None = None,
 ) -> int:
     """Create a Pending case using current scored history or an on-demand baseline."""
     if not recommendation:
@@ -44,12 +48,32 @@ def create_case(
             # The first case creates its baseline, current pointer, and case
             # together. Import and population scoring never create history.
             if scoring is None:
-                raise ValueError(
-                    "a supplied scoring result is required for the first-case baseline"
+                published = conn.execute(
+                    """SELECT s.*, (SELECT COUNT(*) FROM operational_scores) AS cohort_size
+                       FROM operational_scores AS s WHERE s.Member_ID=?""",
+                    (member_id,),
+                ).fetchone()
+                if published is None:
+                    raise ValueError(
+                        f"member {member_id} has no published operational worklist score; "
+                        "run scoring with --operational first"
+                    )
+                baseline_result = assessment_score_payload(
+                    published,
+                    cohort_id=published["cohort_id"],
+                    cohort_calculated_at=published["calculated_at"],
+                    cohort_size=published["cohort_size"],
                 )
+            else:
+                baseline_result = dict(scoring)
             inputs = {name: member[name] for name in FEATURES}
-            baseline_result = dict(scoring)
             baseline_result["recommendation_action"] = recommendation
+            if recommendation_reason is not None:
+                baseline_result["recommendation_reason"] = recommendation_reason
+            if recommendation_rule_version is not None:
+                baseline_result["recommendation_rule_version"] = (
+                    recommendation_rule_version
+                )
             assessment_id = _insert_assessment(
                 conn, member_id, inputs, "baseline", baseline_result
             )

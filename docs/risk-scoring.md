@@ -63,15 +63,32 @@ persistence API. This calculation leaves the published worklist and
 assessment history unchanged. The context records the worklist ID,
 scope, size, calculation times, safety-review status, and ordering policy.
 Refresh the full worklist before ranking with a different operational model
-or a new version. Historical assessments keep their original ranks, contexts
-and versions. Issue #35 will coordinate baseline
-creation, finalization of pending reassessments, current references, and
-publishing the updated worklist after reassessment.
+or a new version.
+
+When creating a member's first case without a supplied score,
+`mh_risk_outreach.db.outreach.create_case` copies the member's published score,
+explanation, and cohort rank context into a baseline assessment. The baseline,
+current assessment reference, and case are saved together. The case action
+and any supplied recommendation reason and rule version are saved in the
+baseline and the case. The member must already have a published worklist score.
+
+After submitting a reassessment, call
+`mh_risk_outreach.operational.finalize_operational_reassessment` with the latest
+pending assessment ID and any precomputed recommendation metadata. It reruns
+scoring for the full population using the pending inputs for that member's score.
+It then archives the target's score and exact rank context and publishes the
+new cohort in one transaction. The published cohort must match the configured
+operational model and current artifact version before the run. An overlapping
+assessment submission, worklist refresh, configured model switch, or artifact
+update can invalidate the run. Scoring or write failures preserve the existing
+assessment history and worklist. Historical assessments and cases retain the
+scores, ranks, and versions recorded when they were created.
 
 ## Issue #16 historical design
 
 The following sections record the initial implementation and its handoff to
-the comparison page. The worklist behavior above reflects issue #34.
+the comparison page. Issues #34 and #35 cover the operational worklist and
+assessment workflows above.
 
 ## Deliverable
 
