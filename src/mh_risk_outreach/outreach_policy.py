@@ -12,6 +12,7 @@ from mh_risk_outreach.db.assessments import _connect
 from mh_risk_outreach.db.operational_population import load_operational_member_ids
 from mh_risk_outreach.db.operational_scores import (
     WRONG_POPULATION,
+    PublishedCohort,
     _published_cohort,
     worklist_requires_refresh,
 )
@@ -21,6 +22,7 @@ from mh_risk_outreach.models.artifacts import (
     artifact_model_version,
 )
 from mh_risk_outreach.operational import (
+    _active_artifact_matches,
     operational_model_name,
     recommend_operational_baselines,
 )
@@ -124,22 +126,28 @@ class OutreachPolicy:
         """Read both queues and the shared capacity from one SQLite snapshot."""
         with closing(_connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN")
-            return self._worklists(conn)
+            worklists, _ = self._worklists(conn)
+            return worklists
 
     def dashboard(self) -> tuple[OutreachWorklists, list[dict[str, Any]]]:
         """Read capacity, candidates, and active cases from one SQLite snapshot."""
         with closing(_connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN")
-            return self._worklists(conn), _list_active_cases(conn)
+            worklists, _ = self._worklists(conn)
+            return worklists, _list_active_cases(conn)
 
-    def _worklists(self, conn: Connection) -> OutreachWorklists:
+    def _worklists(
+        self, conn: Connection
+    ) -> tuple[OutreachWorklists, PublishedCohort | None]:
         active = conn.execute(
             "SELECT COUNT(*) FROM outreach_cases WHERE status IN ('Pending', 'Accepted')"
         ).fetchone()[0]
         slots = max(0, self.capacity - active)
         member_ids = load_operational_member_ids(conn)
         requires_refresh = worklist_requires_refresh(conn, member_ids)
-        model, version, scoring_issue = self._scoring_context(conn, requires_refresh)
+        cohort, scoring_issue = self._scoring_context(conn, requires_refresh)
+        model = cohort.model_name if cohort else None
+        version = cohort.model_version if cohort else None
         safety: list[OutreachCandidate] = []
         standard: list[OutreachCandidate] = []
         for row in conn.execute(
@@ -205,7 +213,7 @@ class OutreachPolicy:
                 has_active_case=bool(row["has_active_case"]),
             )
             (safety if flags else standard).append(candidate)
-        return OutreachWorklists(
+        worklists = OutreachWorklists(
             active,
             slots,
             tuple(safety),
@@ -213,26 +221,28 @@ class OutreachPolicy:
             requires_refresh,
             scoring_issue,
         )
+        return worklists, cohort
 
     def _scoring_context(
         self, conn: Connection, requires_refresh: bool
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[PublishedCohort | None, str | None]:
+        """Return the published cohort when its model matches the active artifact."""
         if requires_refresh:
-            return None, None, WRONG_POPULATION
+            return None, WRONG_POPULATION
         try:
             model = operational_model_name()
             version = artifact_model_version(model, self.artifacts_dir)
         except (TypeError, ValueError) as exc:
-            return None, None, str(exc)
+            return None, str(exc)
         if version is None:
-            return None, None, f"Train the configured operational model ({model})."
+            return None, f"Train the configured operational model ({model})."
         cohort = _published_cohort(conn)
         if cohort is None or (cohort.model_name, cohort.model_version) != (
             model,
             version,
         ):
-            return None, None, "Publish scores for the configured operational model."
-        return model, version, None
+            return None, "Publish scores for the configured operational model."
+        return cohort, None
 
     def create_case(self, selection: OutreachCandidate) -> int:
         """Create a single case using the same policy as a bulk selection."""
@@ -276,13 +286,26 @@ class OutreachPolicy:
             # Keep that work outside the write lock and use the saved result at commit.
             with closing(_connect(self.db_path)) as conn, conn:
                 conn.execute("BEGIN")
-                current = self._require_selections(conn, selected)
+                current, _ = self._require_selections(conn, selected)
             self.prepare_recommendations(current)
 
         with closing(_connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = self._require_selections(conn, selected)
-            return [self._persist_selection(conn, candidate) for candidate in current]
+            current, cohort = self._require_selections(conn, selected)
+            case_ids = [
+                self._persist_selection(conn, candidate) for candidate in current
+            ]
+            # Artifact publication can advance independently of the SQLite lock.
+            if not _active_artifact_matches(
+                operational_model_name(),
+                cohort.model_name,
+                cohort.model_version,
+                self.artifacts_dir,
+            ):
+                raise ValueError(
+                    "operational model changed during case creation; refresh the outreach worklists"
+                )
+            return case_ids
 
     @staticmethod
     def _persist_selection(
@@ -303,8 +326,8 @@ class OutreachPolicy:
 
     def _require_selections(
         self, conn: Connection, selections: tuple[OutreachCandidate, ...]
-    ) -> tuple[OutreachCandidate, ...]:
-        worklists = self._worklists(conn)
+    ) -> tuple[tuple[OutreachCandidate, ...], PublishedCohort]:
+        worklists, cohort = self._worklists(conn)
         if worklists.requires_score_refresh:
             raise ValueError(WRONG_POPULATION)
         standard_count = sum(not selection.safety_flags for selection in selections)
@@ -315,8 +338,10 @@ class OutreachPolicy:
             for candidate in (*worklists.standard_outreach, *worklists.safety_review)
             if candidate.selectable
         }
-        if any(selection not in selectable for selection in selections):
+        if cohort is None or any(
+            selection not in selectable for selection in selections
+        ):
             raise ValueError(
                 "selection is no longer eligible; refresh the outreach worklists"
             )
-        return tuple(selectable[selection] for selection in selections)
+        return tuple(selectable[selection] for selection in selections), cohort

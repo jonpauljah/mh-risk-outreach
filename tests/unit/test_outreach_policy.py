@@ -128,6 +128,47 @@ def test_bulk_selection_rolls_back_earlier_cases_and_baselines_on_insert_failure
     assert policy.worklists().standard_outreach == (first, second)
 
 
+@pytest.mark.parametrize("change", ["model name", "artifact version"])
+def test_bulk_selection_rolls_back_when_model_changes_during_insert(
+    policy, monkeypatch, change
+):
+    selections = policy.worklists().standard_outreach
+    policy.prepare_recommendations(selections)
+    version = "v1"
+
+    def artifact_version(*args):
+        return version
+
+    monkeypatch.setattr(outreach_policy, "artifact_model_version", artifact_version)
+    monkeypatch.setattr(operational, "artifact_model_version", artifact_version)
+
+    inserted = []
+    create_case = outreach_policy._create_case
+
+    def insert_with_model_change(conn, member_id, *args, **kwargs):
+        nonlocal version
+        case_id = create_case(conn, member_id, *args, **kwargs)
+        inserted.append(member_id)
+        if len(inserted) == 1:
+            if change == "model name":
+                monkeypatch.setenv(OPERATIONAL_MODEL_ENV, "xgboost")
+            else:
+                version = "v2"
+        return case_id
+
+    monkeypatch.setattr(outreach_policy, "_create_case", insert_with_model_change)
+
+    with pytest.raises(
+        ValueError, match="operational model changed during case creation"
+    ):
+        policy.create_cases(selections)
+
+    assert inserted == [selection.member_id for selection in selections]
+    with closing(sqlite3.connect(policy.db_path)) as conn:
+        for table in ("outreach_cases", "risk_assessments", "member_assessment_state"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
 def test_bulk_selection_rechecks_every_candidate_after_recommendation(
     policy, monkeypatch
 ):
