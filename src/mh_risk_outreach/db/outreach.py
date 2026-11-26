@@ -10,7 +10,15 @@ from typing import Any
 
 from mh_risk_outreach.config import DEFAULT_DB_PATH, FEATURES
 from mh_risk_outreach.db.assessments import _connect, _insert_assessment, _now
-from mh_risk_outreach.db.operational_scores import assessment_score_payload
+from mh_risk_outreach.db.operational_population import (
+    load_operational_member_ids,
+    require_operational_member,
+)
+from mh_risk_outreach.db.operational_scores import (
+    WRONG_POPULATION,
+    assessment_score_payload,
+    worklist_requires_refresh,
+)
 
 
 def create_case(
@@ -60,6 +68,10 @@ def _create_case(
     ).fetchone()
     if member is None:
         raise ValueError(f"unknown member {member_id}")
+    member_ids = load_operational_member_ids(conn)
+    require_operational_member(member_id, member_ids)
+    if worklist_requires_refresh(conn, member_ids):
+        raise ValueError(WRONG_POPULATION)
     if conn.execute(
         "SELECT 1 FROM outreach_cases WHERE Member_ID=? AND status IN ('Pending','Accepted')",
         (member_id,),

@@ -84,7 +84,11 @@
 
 6. Score members and build the outreach worklist:
 
-   Use the trained operational model to score all imported members.
+   SQLite retains all 10,000 imported members. The 8,000 training members
+   supply model fitting, risk bands, and SHAP background. The original 2,000
+   held-out members supply model evaluation and make up the fixed operational
+   population. Operational scoring refreshes those 2,000 members and outreach
+   uses a separately configured shared capacity K.
 
    ```bash
    uv run python -m mh_risk_outreach.scoring --operational
@@ -97,6 +101,16 @@
    safety-review status, and contact rank. Members requiring safety review
    come first, followed by descending scores compared at 10 decimal places
    and ascending IDs to resolve ties.
+
+   For an existing database, run a read-only scope and history audit.
+
+   ```bash
+   uv run python -m mh_risk_outreach.scoring --audit-operational
+   ```
+
+   If the audit reports an old or mismatched worklist, rerun `--operational`.
+   Review any out-of-scope history reported by the audit. See the
+   [recovery procedure](docs/risk-scoring.md#recovering-an-existing-database).
 
    Use `--model` to score comparison models separately.
 

@@ -88,7 +88,7 @@ FEATURES = NUMERIC + CATEGORICAL  # all 50 stored source features
 TARGET = "Has_Mental_Health_Issue"  # the Y answer key (never a feature)
 MEMBER_ID = "Member_ID"  # surrogate key added during transform
 
-OPERATIONAL_SCOPE = "all_imported_members"
+OPERATIONAL_SCOPE = "held_out_members"
 # Batch and single-member predictions can differ by floating-point noise.
 RANK_SCORE_DECIMALS = 10
 RANK_SORT_KEYS = (

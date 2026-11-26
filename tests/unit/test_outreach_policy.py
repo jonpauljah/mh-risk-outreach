@@ -10,7 +10,12 @@ import pandas as pd
 import pytest
 
 from mh_risk_outreach import outreach_policy
-from mh_risk_outreach.config import DEFAULT_CSV_PATH, MEMBER_ID, OPERATIONAL_MODEL_ENV
+from mh_risk_outreach.config import (
+    DEFAULT_CSV_PATH,
+    MEMBER_ID,
+    OPERATIONAL_MODEL_ENV,
+    TARGET,
+)
 from mh_risk_outreach.db.assessments import finalize_scoring, submit_reassessment
 from mh_risk_outreach.db.outreach import (
     get_case,
@@ -18,7 +23,7 @@ from mh_risk_outreach.db.outreach import (
     update_case_decision,
 )
 from mh_risk_outreach.db.repository import save_records
-from mh_risk_outreach.outreach_policy import OutreachPolicy
+from mh_risk_outreach.outreach_policy import OutreachCandidate, OutreachPolicy
 from mh_risk_outreach.recommendations import SAFETY_REVIEW_ACTION, recommend_action
 
 
@@ -26,9 +31,11 @@ from mh_risk_outreach.recommendations import SAFETY_REVIEW_ACTION, recommend_act
 def policy(tmp_path, monkeypatch):
     monkeypatch.delenv(OPERATIONAL_MODEL_ENV, raising=False)
     path = str(tmp_path / "outreach.sqlite")
-    records = pd.read_csv(DEFAULT_CSV_PATH, nrows=5)
-    records.insert(0, MEMBER_ID, [1, 2, 3, 4, 5])
-    records["Self_Harm_Thoughts"] = [1, 0, 0, 0, 0]
+    records = pd.read_csv(DEFAULT_CSV_PATH, nrows=25)
+    records.insert(0, MEMBER_ID, range(1, 26))
+    records[TARGET] = records.index % 2
+    # Member 7 is held out and member 1 is in training. Both are flagged.
+    records["Self_Harm_Thoughts"] = records[MEMBER_ID].isin([1, 7]).astype(int)
     records["Suicidal_Thoughts"] = 0
     save_records(records, path)
     with closing(sqlite3.connect(path)) as conn, conn:
@@ -37,11 +44,11 @@ def policy(tmp_path, monkeypatch):
                VALUES (?, 'logistic_regression', 'v1', ?, ?, ?, 'Score evidence',
                        ?, NULL, NULL, 0, 'cohort-1', '2026-11-16T11:00:00+00:00')""",
             [
-                (1, 25, "Low", 1, 1),
-                (2, 98, "Very High", 2, 0),
-                (3, 86, "High", 3, 0),
-                (4, 83, "High", 4, 0),
-                (5, 54, "Medium", 5, 0),
+                (7, 25, "Low", 1, 1),
+                (13, 98, "Very High", 2, 0),
+                (16, 86, "High", 3, 0),
+                (21, 83, "High", 4, 0),
+                (24, 54, "Medium", 5, 0),
             ],
         )
 
@@ -72,15 +79,15 @@ def test_worklists_and_safety_exception_use_shared_capacity(policy):
     first = policy.worklists()
     assert first.active_cases == 0
     assert first.standard_slots == 2
-    assert [c.member_id for c in first.standard_outreach] == [2, 3]
+    assert [c.member_id for c in first.standard_outreach] == [13, 16]
     wider = replace(policy, capacity=10).worklists()
-    assert [c.member_id for c in wider.standard_outreach] == [2, 3, 4]
+    assert [c.member_id for c in wider.standard_outreach] == [13, 16, 21]
     (safety,) = first.safety_review
     assert safety.band == "Low"
     assert safety.safety_flags == ("Self_Harm_Thoughts",)
 
     standard_id = policy.create_case(first.standard_outreach[0])
-    assert [c.member_id for c in policy.worklists().standard_outreach] == [3]
+    assert [c.member_id for c in policy.worklists().standard_outreach] == [16]
     update_case_decision(
         standard_id,
         {"status": "Accepted", "accepted_at": "2026-11-16T11:15:00+00:00"},
@@ -108,18 +115,18 @@ def test_worklists_and_safety_exception_use_shared_capacity(policy):
     complete(safety_id, policy.db_path)
     freed = policy.worklists()
     assert freed.standard_slots == 1
-    assert [c.member_id for c in freed.standard_outreach] == [4]
+    assert [c.member_id for c in freed.standard_outreach] == [21]
     assert freed.safety_review == ()
 
 
 def test_latest_flags_visible_before_scoring_even_with_active_case(policy):
     first = policy.worklists().standard_outreach[0]
     case_id = policy.create_case(first)
-    pending_id = submit_reassessment(2, {"Suicidal_Thoughts": 1}, policy.db_path)
+    pending_id = submit_reassessment(13, {"Suicidal_Thoughts": 1}, policy.db_path)
     full = replace(policy, capacity=1)
     entries = full.worklists()
     assert entries.standard_slots == 0
-    pending = next(c for c in entries.safety_review if c.member_id == 2)
+    pending = next(c for c in entries.safety_review if c.member_id == 13)
     assert pending.assessment_id == pending_id
     assert pending.safety_flags == ("Suicidal_Thoughts",)
     assert pending.pending_scoring
@@ -129,9 +136,9 @@ def test_latest_flags_visible_before_scoring_even_with_active_case(policy):
         full.create_case(pending)
 
     complete(case_id, policy.db_path)
-    submit_reassessment(2, {"Suicidal_Thoughts": 0}, policy.db_path)
-    assert [c.member_id for c in full.worklists().safety_review] == [1]
-    assert [c.member_id for c in full.worklists().standard_outreach] == [3]
+    submit_reassessment(13, {"Suicidal_Thoughts": 0}, policy.db_path)
+    assert [c.member_id for c in full.worklists().safety_review] == [7]
+    assert [c.member_id for c in full.worklists().standard_outreach] == [16]
 
 
 @pytest.mark.parametrize("superseded", [False, True])
@@ -141,11 +148,11 @@ def test_repeat_outreach_requires_new_finalized_operational_assessment(
     selection = policy.worklists().standard_outreach[0]
     case_id = policy.create_case(selection)
     complete(case_id, policy.db_path)
-    assert [c.member_id for c in policy.worklists().standard_outreach] == [3, 4]
+    assert [c.member_id for c in policy.worklists().standard_outreach] == [16, 21]
     with pytest.raises(ValueError, match="no longer eligible"):
         policy.create_case(selection)
 
-    reassessment_id = submit_reassessment(2, {"Feeling_Sad_Down": 9}, policy.db_path)
+    reassessment_id = submit_reassessment(13, {"Feeling_Sad_Down": 9}, policy.db_path)
     result = {
         "risk_score": 96,
         "band_level_priority": "Very High",
@@ -158,25 +165,25 @@ def test_repeat_outreach_requires_new_finalized_operational_assessment(
         "recommendation_reason": "Reported feeling sad or down was 9.",
         "recommendation_rule_version": "outreach-rules-v1",
     }
-    assert [c.member_id for c in policy.worklists().standard_outreach] == [3, 4]
+    assert [c.member_id for c in policy.worklists().standard_outreach] == [16, 21]
     finalize_scoring(reassessment_id, result, policy.db_path)
-    assert [c.member_id for c in policy.worklists().standard_outreach] == [3, 4]
+    assert [c.member_id for c in policy.worklists().standard_outreach] == [16, 21]
     with closing(sqlite3.connect(policy.db_path)) as conn, conn:
         conn.execute("UPDATE operational_scores SET cohort_id = 'cohort-2'")
         conn.execute(
             """UPDATE operational_scores SET score_assessment_id = ?, safety_assessment_id = ?
-               WHERE Member_ID = 2""",
+               WHERE Member_ID = 13""",
             (reassessment_id, reassessment_id),
         )
 
     current = policy.worklists().standard_outreach[0]
-    assert current.member_id == 2
+    assert current.member_id == 13
     assert current.assessment_id == reassessment_id
     if superseded:
-        submit_reassessment(2, {}, policy.db_path)
+        submit_reassessment(13, {}, policy.db_path)
         with pytest.raises(ValueError, match="no longer eligible"):
             policy.create_case(current)
-        assert len(list_member_history(2, policy.db_path)["cases"]) == 1
+        assert len(list_member_history(13, policy.db_path)["cases"]) == 1
     else:
         repeat = get_case(policy.create_case(current), policy.db_path)
         assert repeat["assessment_id"] == reassessment_id
@@ -196,7 +203,7 @@ def test_concurrent_selections_cannot_exceed_capacity_or_duplicate(
     original = outreach_policy.score_operational_member
 
     def preview(member_id, inputs, **kwargs):
-        if member_id != 1:
+        if member_id != 7:
             ready.wait()
             release.wait()
         return original(member_id, inputs, **kwargs)
@@ -246,7 +253,7 @@ def test_cohort_refresh_during_recommendation_rejects_stale_selection(
     monkeypatch.setattr(outreach_policy, "score_operational_member", preview)
     with pytest.raises(ValueError, match="no longer eligible"):
         policy.create_case(selection)
-    assert list_member_history(2, policy.db_path) == {"cases": [], "assessments": []}
+    assert list_member_history(13, policy.db_path) == {"cases": [], "assessments": []}
 
 
 def test_safety_visible_without_operational_scores(policy, monkeypatch):
@@ -254,9 +261,40 @@ def test_safety_visible_without_operational_scores(policy, monkeypatch):
     worklists = policy.worklists()
     assert worklists.standard_outreach == ()
     (concern,) = worklists.safety_review
-    assert concern.member_id == 1
+    assert concern.member_id == 7
     assert concern.cohort_id is None
     assert not concern.selectable
+
+
+@pytest.mark.parametrize("queue", ["safety_review", "standard_outreach"])
+def test_training_member_cannot_be_selected(policy, queue):
+    selection = getattr(policy.worklists(), queue)[0]
+    with pytest.raises(ValueError, match="no longer eligible"):
+        policy.create_case(replace(selection, member_id=1))
+    assert list_member_history(1, policy.db_path) == {"cases": [], "assessments": []}
+
+
+def test_wrong_member_ids_invalidate_same_size_worklist(policy):
+    old_selection = policy.worklists().standard_outreach[0]
+    with closing(sqlite3.connect(policy.db_path)) as conn, conn:
+        conn.execute("UPDATE operational_scores SET Member_ID = 1 WHERE Member_ID = 24")
+
+    worklists = policy.worklists()
+    assert worklists.requires_score_refresh
+    assert worklists.standard_outreach == ()
+    (concern,) = worklists.safety_review
+    assert concern == OutreachCandidate(
+        member_id=7,
+        assessment_id=None,
+        cohort_id=None,
+        band=None,
+        rank=None,
+        safety_flags=("Self_Harm_Thoughts",),
+        pending_scoring=False,
+        selectable=False,
+    )
+    with pytest.raises(ValueError, match="refresh scoring"):
+        policy.create_case(old_selection)
 
 
 @pytest.mark.parametrize("capacity", [-1, True, 1.5])

@@ -6,9 +6,12 @@ available, along with the remaining Milestone 3 workflow. See the
 
 ## System Architecture
 
-Python ETL imports the synthetic survey into SQLite `patients`. Python ML
-components train and compare Logistic Regression, Random Forest, and XGBoost;
-comparison scoring writes replaceable `<model>_scores` tables and operational
+Python ETL imports all 10,000 synthetic survey records into SQLite `patients`.
+The existing deterministic split provides 8,000 original records for model
+training, band fitting, and the SHAP background. The 2,000 held-out IDs define
+the evaluation and operational populations. Model evaluation reads original
+survey inputs and operational scoring can use updated assessment snapshots.
+Comparison scoring writes replaceable `<model>_scores` tables and operational
 scoring writes a separate `operational_scores` worklist. Streamlit currently
 displays member records, model evaluation, and risk scoring. See the existing
 [database](../milestone-1/database.md) and [risk-scoring](../risk-scoring.md)
@@ -26,14 +29,22 @@ documentation for details.
 
 ```mermaid
 flowchart LR
-    P[patients: imported inputs] --> S[Explicit operational scoring]
-    P --> N[NBA and safety rules]
-    S --> R[Model score results]
+    P["Imported patients (10,000)"] --> D["Deterministic 80/20 split"]
+    D --> T["Training (8,000)"]
+    D --> H["Held-out members (2,000)"]
+    T --> V["Model and versioned bands"]
+    V --> Q["Model evaluation"]
+    H -->|Original survey inputs| Q
+    V --> S["Operational scoring"]
+    T -->|SHAP background| S
+    H --> S
+    S --> R["Operational scores (2,000)"]
     R --> N
+    H --> N["NBA and safety rules"]
     A[risk_assessments: snapshots] --> S
     A --> N
     M[member_assessment_state] --> A
-    N --> E[Eligibility and capacity]
+    N --> E["Outreach eligibility and capacity K"]
     E -->|Manager selects| C[outreach_cases]
     C --> A
     U[Streamlit workflows] --> S
@@ -49,7 +60,7 @@ flags from model predictors and reevaluated all three models.
 ## Risk Scoring and Assessment Workflow
 
 1. A manager explicitly runs the operational scoring CLI to refresh the
-   worklist for all imported members. Logistic regression is the configurable
+   worklist for the 2,000 held-out members. Logistic regression is the configurable
    default. All three models remain available for comparison. The scoring
    paths share the five ordered bands saved with each version. See
    [Risk scoring](../risk-scoring.md) for configuration and ordering.
@@ -67,11 +78,12 @@ flags from model predictors and reevaluated all three models.
    scored inputs for the model and the pending inputs for safety flags.
    Earlier pending snapshots remain in history when superseded.
 5. The explicit backend scoring operation finalizes the latest pending
-   assessment and publishes an updated population worklist in the same
+   assessment and publishes an updated 2,000-member worklist in the same
    transaction. The assessment archives the row's score, explanation, band,
    rank, cohort and model metadata, and the generated recommendation. An unused
    scored current assessment with a matching stored action can supply a later case.
-   Subsequent refreshes leave those historical snapshots intact.
+   Subsequent refreshes leave those historical snapshots intact. Training,
+   evaluation, and membership continue to read the original imported survey.
 
 [#41](https://github.com/jonpauljah/mh-risk-outreach/issues/41) currently
 describes immediate recalculation and atomic scored submission. The
@@ -98,10 +110,12 @@ Displaying a recommendation while scoring is pending is a later UI integration.
 
 Configure one shared `OutreachPolicy(capacity=K)` for the database.
 `worklists()` returns **Safety Review**, **Standard Outreach**, and the
-remaining standard slots. Safety Review reads flags directly from the latest
-saved inputs. A case linked to those inputs removes that snapshot from the
-queue. A newer flagged snapshot appears even while a case for an earlier
-snapshot is active or the new snapshot is awaiting scoring.
+remaining standard slots. Both queues start with the held-out IDs. Safety
+Review reads flags directly from the latest saved inputs and can surface an
+in-scope concern before a published score is available. A case linked to
+those inputs removes that snapshot from the queue. A newer flagged snapshot
+appears even while a case for an earlier snapshot is active or the new
+snapshot is awaiting scoring.
 
 Standard candidates are unflagged, have no active case, and have a qualifying
 High or Very High score in the published cohort for the configured model and
@@ -120,6 +134,11 @@ recommendation on the finalized assessment. Completing a case frees a slot.
 Repeat standard outreach requires a newer qualifying manual assessment and
 continued eligibility. Read-only demo previews leave eligibility unchanged.
 The manager-selected flow requires the sponsor approval noted in #37.
+
+If published scores cover a different set of IDs, `requires_score_refresh`
+is true. Standard Outreach is empty, and current concerns for held-out members
+remain visible in Safety Review while selection is unavailable. See the
+[worklist recovery procedure](../risk-scoring.md#recovering-an-existing-database).
 
 ## Case Lifecycle
 

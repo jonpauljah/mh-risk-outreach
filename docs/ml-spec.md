@@ -212,8 +212,8 @@ never saw. The code splits rows only; it fits no scaler, imputer, or model.
 
 **Split approach.** `split_dataset(records)` calls scikit-learn's
 `train_test_split` with `test_size=0.20`, `stratify=records[TARGET]`, and
-`random_state=42`. The split is on the rows returned by
-`repository.load_from_db()` and is produced in memory — the parts are not
+`random_state=42`. The split uses the original imported `patients` rows
+in ascending `Member_ID` order and is produced in memory. The parts are not
 written to disk (an opt-in `write_splits` helper exists for local inspection
 only; the files are large and are not committed). `RANDOM_STATE` and `TEST_SIZE`
 live in `config.py`.
@@ -231,6 +231,11 @@ live in `config.py`.
 | Training | 8,000 (80%) | 7,373 (92.2%) | 627 |
 | Evaluation | 2,000 (20%) | 1,843 (92.2%) | 157 |
 | Total | 10,000 | 9,216 | 784 |
+
+The same 2,000 held-out IDs define the operational cohort. Evaluation
+continues to use the original survey inputs after reassessments. The
+8,000 training members also provide the reference scores for risk-band
+fitting and the SHAP background.
 
 **No leakage.** The split happens before anything is fitted. The preparation
 pipeline (`build_preparation_pipeline`) and the model are fitted on the training
@@ -625,8 +630,8 @@ then ascending `Member_ID` for ties. The stored score keeps its original precisi
 `rank_priority` starts at 1 and gives the contact order for that cohort.
 
 Run `uv run python -m mh_risk_outreach.scoring --operational` to publish
-the full worklist in `operational_scores`. For comparison, `--model <name>`
-or `--model all` refreshes the corresponding `<model>_scores` tables and
+the 2,000-member held-out worklist in `operational_scores`. For comparison,
+`--model <name>` or `--model all` refreshes the corresponding `<model>_scores` tables and
 defaults to the held-out rows. See [Risk scoring](risk-scoring.md) for
 worklist refresh and individual scoring.
 

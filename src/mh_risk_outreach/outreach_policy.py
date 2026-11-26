@@ -1,11 +1,17 @@
 """Build manager worklists and enforce outreach eligibility when selected."""
 
+import json
 from contextlib import closing
 from dataclasses import dataclass
 from sqlite3 import Connection
 
 from mh_risk_outreach.config import CRITICAL_INDICATORS, DEFAULT_DB_PATH, FEATURES
 from mh_risk_outreach.db.assessments import _connect
+from mh_risk_outreach.db.operational_population import load_operational_member_ids
+from mh_risk_outreach.db.operational_scores import (
+    WRONG_POPULATION,
+    worklist_requires_refresh,
+)
 from mh_risk_outreach.db.outreach import _create_case
 from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
@@ -38,6 +44,7 @@ class OutreachWorklists:
     standard_slots: int
     safety_review: tuple[OutreachCandidate, ...]
     standard_outreach: tuple[OutreachCandidate, ...]
+    requires_score_refresh: bool = False
 
 
 # Use live input flags instead of cached flags on the published score. A manual
@@ -63,6 +70,7 @@ _CANDIDATES = f"""
                WHERE completed.Member_ID = p.Member_ID AND completed.status = 'Completed'
            ) AS last_completed_assessment
     FROM patients AS p
+    JOIN json_each(?) AS operational ON operational.value = p.Member_ID
     LEFT JOIN member_assessment_state AS state ON state.Member_ID = p.Member_ID
     LEFT JOIN risk_assessments AS a ON a.assessment_id = state.assessment_id
     LEFT JOIN operational_scores AS score ON score.Member_ID = p.Member_ID
@@ -102,11 +110,19 @@ class OutreachPolicy:
             "SELECT COUNT(*) FROM outreach_cases WHERE status IN ('Pending', 'Accepted')"
         ).fetchone()[0]
         slots = max(0, self.capacity - active)
+        member_ids = load_operational_member_ids(conn)
+        requires_refresh = worklist_requires_refresh(conn, member_ids)
         model = operational_model_name()
-        version = artifact_model_version(model, self.artifacts_dir)
+        version = (
+            None
+            if requires_refresh
+            else artifact_model_version(model, self.artifacts_dir)
+        )
         safety: list[OutreachCandidate] = []
         standard: list[OutreachCandidate] = []
-        for row in conn.execute(_CANDIDATES, (model, version)):
+        for row in conn.execute(
+            _CANDIDATES, (json.dumps(sorted(member_ids)), model, version)
+        ):
             if row["used_assessment"]:
                 continue
             flags = tuple(flag for flag in CRITICAL_INDICATORS if row[flag] == 1)
@@ -151,7 +167,9 @@ class OutreachPolicy:
                 selectable=selectable,
             )
             (safety if flags else standard).append(candidate)
-        return OutreachWorklists(active, slots, tuple(safety), tuple(standard))
+        return OutreachWorklists(
+            active, slots, tuple(safety), tuple(standard), requires_refresh
+        )
 
     def create_case(self, selection: OutreachCandidate) -> int:
         """Create a selected case after rechecking the policy under a write lock."""
@@ -204,6 +222,8 @@ class OutreachPolicy:
         self, conn: Connection, selection: OutreachCandidate
     ) -> None:
         worklists = self._worklists(conn)
+        if worklists.requires_score_refresh:
+            raise ValueError(WRONG_POPULATION)
         if selection.safety_flags:
             candidates = worklists.safety_review
         else:

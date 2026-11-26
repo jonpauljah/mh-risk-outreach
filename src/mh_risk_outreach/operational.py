@@ -18,15 +18,15 @@ from mh_risk_outreach.config import (
 from mh_risk_outreach.config import (
     OPERATIONAL_SCOPE as OPERATIONAL_SCOPE,  # noqa: PLC0414
 )
-from mh_risk_outreach.datasets import split_dataset
+from mh_risk_outreach.datasets import DatasetSplit
 from mh_risk_outreach.db.operational_scores import (
+    NO_WORKLIST,
     AssessmentInputs,
     assessment_score_payload,
+    load_candidate_scoring_inputs,
     load_operational_inputs,
-    load_operational_scores,
     save_operational_scores,
 )
-from mh_risk_outreach.db.repository import load_from_db
 from mh_risk_outreach.models import DEFAULT_MODEL, REGISTRY
 from mh_risk_outreach.models.artifacts import (
     DEFAULT_ARTIFACTS_DIR,
@@ -75,11 +75,11 @@ def _validate_active_artifact(artifact: ScoringArtifact, artifacts_dir: str) -> 
 def refresh_operational_worklist(
     *, db_path: str = DEFAULT_DB_PATH, artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
 ) -> pd.DataFrame:
-    """Score all imported members and atomically replace the operational worklist."""
+    """Score the held-out members and atomically replace the operational worklist."""
     model = operational_model_name()
     artifact = load_scoring_artifact(model, artifacts_dir)
-    patients, assessment_inputs, cohort = load_operational_inputs(db_path)
-    worklist = _build_operational_worklist(patients, assessment_inputs, artifact)
+    split, assessment_inputs, cohort = load_operational_inputs(db_path)
+    worklist = _build_operational_worklist(split, assessment_inputs, artifact)
     save_operational_scores(
         worklist,
         expected_inputs=assessment_inputs,
@@ -104,7 +104,9 @@ def finalize_operational_reassessment(
 
     Supplied recommendation metadata must agree with the generated fields.
     """
-    patients, assessment_inputs, cohort = load_operational_inputs(db_path)
+    split, assessment_inputs, cohort = load_operational_inputs(
+        db_path, require_current_population=True
+    )
     pending = next(
         (
             assessment
@@ -117,9 +119,7 @@ def finalize_operational_reassessment(
     if pending is None:
         raise ValueError("assessment must be the current pending reassessment")
     if cohort is None:
-        raise ValueError(
-            "no operational worklist; run scoring with --operational first"
-        )
+        raise ValueError(NO_WORKLIST)
     model = operational_model_name()
     if not _active_artifact_matches(
         model, cohort.model_name, cohort.model_version, artifacts_dir
@@ -129,7 +129,7 @@ def finalize_operational_reassessment(
         )
     artifact = load_scoring_artifact(model, artifacts_dir, version=cohort.model_version)
     worklist = _build_operational_worklist(
-        patients, assessment_inputs, artifact, pending=pending
+        split, assessment_inputs, artifact, pending=pending
     )
     row = worklist.loc[worklist[MEMBER_ID].eq(pending.member_id)].iloc[0]
     contributions = worklist.pop(SHAP_CONTRIBUTIONS).at[row.name]
@@ -165,21 +165,22 @@ def finalize_operational_reassessment(
 
 
 def _build_operational_worklist(
-    patients: pd.DataFrame,
+    split: DatasetSplit,
     assessment_inputs: list[AssessmentInputs],
     artifact: ScoringArtifact,
     *,
     pending: AssessmentInputs | None = None,
 ) -> pd.DataFrame:
-    if patients.empty:
+    if split.evaluation.empty:
         raise ValueError(
             "import the patient dataset before running operational scoring"
         )
-    background = split_dataset(patients).train
-    members = patients.set_index(MEMBER_ID, drop=False)
+    members = split.evaluation.sort_values(MEMBER_ID).set_index(MEMBER_ID, drop=False)
     provenance = {}
     for assessment in assessment_inputs:
         member_id = assessment.member_id
+        if member_id not in members.index:
+            continue
         is_finalizing = (
             pending is not None and assessment.current_id == pending.current_id
         )
@@ -205,7 +206,7 @@ def _build_operational_worklist(
     worklist = score_members(
         members.reset_index(drop=True),
         artifact,
-        background=background,
+        background=split.train,
         contributions_for_member=pending.member_id if pending is not None else None,
     )
     source_columns = [
@@ -243,7 +244,7 @@ def score_operational_member(
     model = operational_model_name()
     if set(inputs) != set(FEATURES):
         raise ValueError("candidate inputs must contain all survey fields")
-    cohort = load_operational_scores(db_path)
+    cohort, background = load_candidate_scoring_inputs(member_id, db_path)
     version = str(cohort["model_version"].iat[0])
     if not _active_artifact_matches(
         model, cohort["operational_model_name"].iat[0], version, artifacts_dir
@@ -251,11 +252,7 @@ def score_operational_member(
         raise ValueError(
             "operational model changed; refresh scoring with --operational"
         )
-    if not cohort[MEMBER_ID].eq(member_id).any():
-        raise ValueError(f"member {member_id} is outside the operational worklist")
-
     artifact = load_scoring_artifact(model, artifacts_dir, version=version)
-    background = split_dataset(load_from_db(db_path).sort_values(MEMBER_ID)).train
     candidate = score_members(
         pd.DataFrame([{MEMBER_ID: member_id, **inputs}]),
         artifact,

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE
+from mh_risk_outreach.config import DEFAULT_DB_PATH, DEFAULT_TABLE, MEMBER_ID
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
@@ -79,7 +79,9 @@ def load_from_db(
     """Read the clean table back out of SQLite (what later segments call)."""
     conn = sqlite3.connect(db_path)
     try:
-        return pd.read_sql(f"SELECT * FROM {table}", conn)
+        # Training, evaluation, and operational scoring split in import ID order.
+        order = f" ORDER BY {MEMBER_ID}" if table == DEFAULT_TABLE else ""
+        return pd.read_sql(f"SELECT * FROM {table}{order}", conn)
     finally:
         conn.close()
 

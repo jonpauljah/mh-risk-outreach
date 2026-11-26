@@ -8,6 +8,7 @@ Run it:
 """
 
 import argparse
+import sqlite3
 from collections.abc import Callable
 
 import numpy as np
@@ -171,7 +172,12 @@ def main() -> None:
     mode.add_argument(
         "--operational",
         action="store_true",
-        help="score the full operational population",
+        help="score the fixed held-out operational population",
+    )
+    mode.add_argument(
+        "--audit-operational",
+        action="store_true",
+        help="check published population and report out-of-scope history (read-only)",
     )
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite path")
     parser.add_argument("--table", help="source records table for comparison scoring")
@@ -184,9 +190,37 @@ def main() -> None:
         help="score the held-out evaluation rows (default) or every member",
     )
     args = parser.parse_args()
+    if (args.operational or args.audit_operational) and (
+        args.scope is not None or args.table is not None
+    ):
+        parser.error("operational commands always use the held-out split of patients")
+    if args.audit_operational:
+        from mh_risk_outreach.db.operational_scores import (
+            WRONG_POPULATION,
+            audit_operational_population,
+        )
+
+        try:
+            audit = audit_operational_population(args.db)
+        except (ValueError, sqlite3.Error) as exc:
+            parser.error(str(exc))
+        print(
+            f"Imported: {audit.training_count + audit.held_out_count:,} | "
+            f"Training: {audit.training_count:,} | "
+            f"Held out (evaluation and operations): {audit.held_out_count:,} | "
+            f"Published operational scores: {audit.published_count:,}"
+        )
+        if audit.requires_refresh:
+            print(WRONG_POPULATION)
+        for label, rows in (
+            ("assessments", audit.excluded_assessments),
+            ("cases", audit.excluded_cases),
+        ):
+            print(f"Out-of-scope {label}: {len(rows):,}")
+            for member_id, record_id, status in rows:
+                print(f"  Member {member_id}, record {record_id} ({status})")
+        return
     if args.operational:
-        if args.scope is not None or args.table is not None:
-            parser.error("--operational always scores the full patients table")
         from mh_risk_outreach.operational import (
             OPERATIONAL_SCOPE,
             refresh_operational_worklist,
